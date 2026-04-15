@@ -137,6 +137,10 @@ Save (.jpg) / Send Email (SMTP)
 - Gmail App Password는 환경변수로 관리
 - 코드 내 계정 정보 하드코딩 금지
 
+- https://drive.google.com/file/d/1qyEP_TBCaiN9r6OENzRydTwNsH6d9rbt/view?usp=sharing
+- https://drive.google.com/file/d/1oEkck62_-gz5Lotyaujl2yXPab18qdK-/view?usp=sharing
+- 위 두 파일을 다운받아 /code 내에 업로드
+
 ---
 
 ## 개발 TODO

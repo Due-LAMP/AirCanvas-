@@ -29,16 +29,34 @@ options = HandLandmarkerOptions(
 )
 
 # ── 상수 ────────────────────────────────────────────────────────
-TOTAL_SHOTS    = 4          # 총 촬영 장수
-COUNTDOWN_SEC  = 3          # 카운트다운 초
-FLASH_SEC      = 0.5        # 촬영 후 플래시 효과 시간
-STRIP_W        = 300        # 오른쪽 스트립 폭
-SLOT_MARGIN    = 12         # 슬롯 간격
-BORDER_COLOR   = (200, 180, 255)   # 라벤더
-FLASH_COLOR    = (255, 255, 255)
-BG_COLOR       = (245, 235, 255)   # 연보라 배경
-TEXT_COLOR     = (80,  20, 120)
-ACCENT_COLOR   = (180, 100, 255)
+TOTAL_SHOTS   = 4          # 총 촬영 장수
+COUNTDOWN_SEC = 3          # 카운트다운 초
+FLASH_SEC     = 0.5        # 촬영 후 플래시 효과 시간
+STRIP_W       = 320        # 오른쪽 스트립 폭
+
+# ── 테마 컬러 (BGR) ─────────────────────────────────────────────
+DARK         = (35,  25,  50)    # 짙은 보라 (HUD, 오버레이)
+ACCENT       = (100,  50, 255)   # 핫핑크/바이올렛
+PINK         = (180, 120, 255)   # 소프트 핑크
+GOLD         = (50,  190, 255)   # 골드/옐로우
+WHITE        = (255, 250, 255)   # 화이트
+STRIP_BG     = (255, 252, 255)   # 스트립 배경
+BG_COLOR     = (245, 235, 255)   # fallback
+BORDER_COLOR = (200, 150, 255)   # 테두리
+TEXT_COLOR   = (40,   20,  80)   # 다크 텍스트
+ACCENT_COLOR = ACCENT            # 하위 호환
+FLASH_COLOR  = (255, 255, 255)
+
+# ── 펜 색상 팔레트 ──────────────────────────────────────────────
+PEN_COLORS = [
+    (0,   0,   255),   # 빨강
+    (0,   165, 255),   # 주황
+    (0,   220, 255),   # 노랑
+    (60,  200,  60),   # 초록
+    (255, 120,   0),   # 파랑
+    (200,  60, 180),   # 보라
+    (255, 255, 255),   # 화이트
+]
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photobooth_output')
 os.makedirs(SAVE_DIR, exist_ok=True)
@@ -65,6 +83,8 @@ def recognize_gesture(fingers_status):
         return 'open'
     elif fingers_status == [0, 1, 1, 0, 0]:
         return 'peace'
+    elif fingers_status == [1, 1, 0, 0, 0]:
+        return 'standby'
     return None
 
 
@@ -126,30 +146,90 @@ def draw_rounded_rect(img, pt1, pt2, color, radius=15, thickness=-1):
 
 
 def make_strip(photos, strip_w, cam_h):
-    """4장 사진을 세로 스트립으로 합성"""
-    n = TOTAL_SHOTS
-    margin = SLOT_MARGIN
-    slot_h = (cam_h - margin * (n + 1)) // n
-    slot_w = strip_w - margin * 2
+    """세련된 4컷 스트립 패널"""
+    n       = TOTAL_SHOTS
+    title_h = 56
+    foot_h  = 44
+    margin  = 14
+    slot_w  = strip_w - margin * 2
+    avail_h = cam_h - title_h - foot_h - margin * (n + 1)
+    slot_h  = avail_h // n
 
-    strip = np.full((cam_h, strip_w, 3), BG_COLOR, dtype=np.uint8)
+    strip = np.full((cam_h, strip_w, 3), STRIP_BG, dtype=np.uint8)
 
+    # 미세 격자 패턴
+    for yy in range(0, cam_h, 18):
+        cv2.line(strip, (0, yy), (strip_w, yy), (238, 230, 248), 1)
+    for xx in range(0, strip_w, 18):
+        cv2.line(strip, (xx, 0), (xx, cam_h), (238, 230, 248), 1)
+
+    # 상단 타이틀 바
+    ov = strip.copy()
+    cv2.rectangle(ov, (0, 0), (strip_w, title_h), DARK, -1)
+    cv2.addWeighted(ov, 0.88, strip, 0.12, 0, strip)
+    title = "4-CUT"
+    tw_t = cv2.getTextSize(title, cv2.FONT_HERSHEY_DUPLEX, 1.15, 2)[0][0]
+    cv2.putText(strip, title, (strip_w//2 - tw_t//2, 40),
+                cv2.FONT_HERSHEY_DUPLEX, 1.15, ACCENT, 2, cv2.LINE_AA)
+    # 타이틀 바 하단 구분선
+    cv2.line(strip, (0, title_h), (strip_w, title_h), PINK, 2)
+
+    # 사진 슬롯
     for i in range(n):
-        y0 = margin + i * (slot_h + margin)
+        y0 = title_h + margin + i * (slot_h + margin)
         x0 = margin
+
         if i < len(photos) and photos[i] is not None:
+            # 폴라로이드 스타일: 흰 테두리 + 그림자
+            pad = 5
+            shadow_off = 3
+            cv2.rectangle(strip,
+                          (x0-pad+shadow_off, y0-pad+shadow_off),
+                          (x0+slot_w+pad+shadow_off, y0+slot_h+pad+shadow_off),
+                          (210, 200, 225), -1)
+            cv2.rectangle(strip, (x0-pad, y0-pad),
+                          (x0+slot_w+pad, y0+slot_h+pad), WHITE, -1)
+            draw_rounded_rect(strip, (x0-pad-1, y0-pad-1),
+                              (x0+slot_w+pad+1, y0+slot_h+pad+1),
+                              PINK, radius=4, thickness=2)
             thumb = cv2.resize(photos[i], (slot_w, slot_h))
             strip[y0:y0+slot_h, x0:x0+slot_w] = thumb
-            draw_rounded_rect(strip, (x0-2, y0-2), (x0+slot_w+2, y0+slot_h+2),
-                               BORDER_COLOR, radius=8, thickness=3)
+            # 완료 배지
+            bx, by = x0+slot_w+pad-3, y0+slot_h+pad-3
+            cv2.circle(strip, (bx, by), 13, ACCENT, -1)
+            cv2.circle(strip, (bx, by), 13, WHITE, 1)
+            cv2.putText(strip, str(i+1), (bx-5, by+5),
+                        cv2.FONT_HERSHEY_DUPLEX, 0.5, WHITE, 1, cv2.LINE_AA)
         else:
+            # 빈 슬롯: 점선 테두리 + 번호 원
             draw_rounded_rect(strip, (x0, y0), (x0+slot_w, y0+slot_h),
-                               (220, 210, 240), radius=8, thickness=-1)
-            num_text = str(i + 1)
-            tw, th = cv2.getTextSize(num_text, cv2.FONT_HERSHEY_DUPLEX, 1.5, 2)[0]
-            cv2.putText(strip, num_text,
-                        (x0 + slot_w//2 - tw//2, y0 + slot_h//2 + th//2),
-                        cv2.FONT_HERSHEY_DUPLEX, 1.5, (200, 180, 230), 2, cv2.LINE_AA)
+                              (242, 235, 252), radius=8, thickness=-1)
+            for d in range(0, slot_w + slot_h, 14):
+                if d < slot_w:
+                    cv2.circle(strip, (x0+d, y0), 1, PINK, -1)
+                    cv2.circle(strip, (x0+d, y0+slot_h), 1, PINK, -1)
+                if d < slot_h:
+                    cv2.circle(strip, (x0, y0+d), 1, PINK, -1)
+                    cv2.circle(strip, (x0+slot_w, y0+d), 1, PINK, -1)
+            cxs, cys = x0 + slot_w//2, y0 + slot_h//2
+            cv2.circle(strip, (cxs, cys), 24, PINK, 2)
+            num_t = str(i+1)
+            ntw = cv2.getTextSize(num_t, cv2.FONT_HERSHEY_DUPLEX, 1.0, 2)[0][0]
+            cv2.putText(strip, num_t, (cxs - ntw//2, cys+8),
+                        cv2.FONT_HERSHEY_DUPLEX, 1.0, PINK, 2, cv2.LINE_AA)
+
+    # 하단: 진행 도트 (●●○○)
+    taken  = len(photos)
+    dot_y  = cam_h - foot_h//2
+    dot_x0 = strip_w//2 - n*12
+    for i in range(n):
+        cx_d = dot_x0 + i*22 + 8
+        if i < taken:
+            cv2.circle(strip, (cx_d, dot_y), 8, ACCENT, -1)
+        else:
+            cv2.circle(strip, (cx_d, dot_y), 8, (210, 195, 230), -1)
+            cv2.circle(strip, (cx_d, dot_y), 8, PINK, 1)
+
     return strip
 
 
@@ -233,19 +313,21 @@ GESTURE_HOLD   = 0.8            # peace 제스처 유지 시간(초)
 fps = 30
 
 # ── 그리기 캔버스 ──────────────────────────────────────────────
-draw_canvas  = None
+draw_canvas    = None
 prev_x, prev_y = None, None
-drawing_color  = (0, 0, 255)
-line_thickness = 3
+color_idx      = 0
+drawing_color  = PEN_COLORS[color_idx]
+line_thickness = 5
+last_standby   = False
 
 print("=" * 50)
 print("  인생네컷 포토부스")
 print("=" * 50)
-print("  ✌ peace  : 사진 촬영 (0.8초 유지)")
-print("  ☝ point  : 그리기")
-print("  ✋ open   : 그림 지우기")
-print("  ✊ fist   : 처음부터 다시")
-print("  ESC      : 종료")
+print("  peace (0.8s)  : 촬영")
+print("  point (index) : 그리기")
+print("  fist          : 펜 색상 변경")
+print("  open          : 그림 지우기 / 완료 시 전체 리셋")
+print("  ESC           : 종료")
 print("=" * 50)
 
 cv2.namedWindow('PhotoBooth', cv2.WINDOW_NORMAL)
@@ -290,18 +372,28 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 iy = int(hand_landmarks[8].y * h)
 
                 # 그리기 제스처 처리
-                if gesture in ('point', 'standby'):
+                if gesture == 'point':
                     if prev_x is not None and prev_y is not None:
                         cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
                     prev_x, prev_y = ix, iy
+                elif gesture == 'fist':
+                    # 첫 진입 시 펜 색상 한 단계 전환
+                    if last_gesture != 'fist':
+                        color_idx = (color_idx + 1) % len(PEN_COLORS)
+                        drawing_color = PEN_COLORS[color_idx]
+                    prev_x, prev_y = None, None
                 elif gesture == 'open':
                     draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
                     prev_x, prev_y = None, None
                 else:
                     prev_x, prev_y = None, None
 
-                # 검지 위치 원 표시
-                cv2.circle(frame, (ix, iy), 8, (0, 255, 255), -1)
+                # 그리기 커서 (링 스타일)
+                if gesture == 'point':
+                    cv2.circle(frame, (ix, iy), line_thickness + 5, drawing_color, 2)
+                    cv2.circle(frame, (ix, iy), 3, drawing_color, -1)
+                else:
+                    cv2.circle(frame, (ix, iy), 11, (200, 200, 200), 1)
 
                 # 랜드마크 그리기
                 for connection in HAND_CONNECTIONS:
@@ -326,14 +418,20 @@ with HandLandmarker.create_from_options(options) as landmarker:
         else:
             gesture_start = None
 
-        if gesture != 'point' and gesture != 'standby' and not (gesture == 'peace'):
+        last_standby = (gesture == 'fist')
+
+        if gesture not in ('point',) and gesture != 'peace':
             prev_x, prev_y = None, None
 
-        if gesture == 'fist' and state in (STATE_WAITING, STATE_DONE):
-            photos = []
-            draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
-            state = STATE_WAITING
-            print("초기화 완료")
+        if gesture == 'open' and state in (STATE_WAITING, STATE_DONE):
+            if state == STATE_DONE or last_gesture != 'open':
+                if state == STATE_DONE:
+                    photos = []
+                    draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                    state = STATE_WAITING
+                    print("초기화 완료")
+                else:
+                    draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
         last_gesture = gesture
 
@@ -369,68 +467,129 @@ with HandLandmarker.create_from_options(options) as landmarker:
         canvas_fg = cv2.bitwise_and(draw_canvas, draw_canvas, mask=mask)
         frame = cv2.add(frame_bg, canvas_fg)
 
-        # ── UI 합성
-        # 오른쪽 스트립
-        strip = make_strip(photos, STRIP_W, h)
-
-        # 캔버스: cam + strip
+        # ── UI 합성 ─────────────────────────────────────────────
+        strip  = make_strip(photos, STRIP_W, h)
         canvas = np.full((h, w + STRIP_W, 3), BG_COLOR, dtype=np.uint8)
         canvas[:, :w] = frame
         canvas[:, w:] = strip
 
+        # ── 상단 HUD 바
+        hud_h = 52
+        hud_ov = canvas.copy()
+        cv2.rectangle(hud_ov, (0, 0), (w, hud_h), DARK, -1)
+        cv2.addWeighted(hud_ov, 0.75, canvas, 0.25, 0, canvas)
+        cv2.line(canvas, (0, hud_h), (w, hud_h), PINK, 1)
+        # 촬영 진행 도트
+        for i in range(TOTAL_SHOTS):
+            cx_h = 28 + i * 28
+            cy_h = hud_h // 2
+            if i < len(photos):
+                cv2.circle(canvas, (cx_h, cy_h), 10, ACCENT, -1)
+                cv2.circle(canvas, (cx_h, cy_h), 10, WHITE, 1)
+            else:
+                cv2.circle(canvas, (cx_h, cy_h), 10, (70, 55, 95), -1)
+                cv2.circle(canvas, (cx_h, cy_h), 10, (120, 90, 155), 1)
+        # Shot 텍스트
+        shot_lbl = f"Shot {min(len(photos)+1,TOTAL_SHOTS)}/{TOTAL_SHOTS}"
+        cv2.putText(canvas, shot_lbl, (TOTAL_SHOTS*28+40, hud_h//2+6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 155, 210), 1, cv2.LINE_AA)
+        # 펜 색상 표시
+        cv2.circle(canvas, (w - 38, hud_h//2), 13, drawing_color, -1)
+        cv2.circle(canvas, (w - 38, hud_h//2), 13, WHITE, 2)
+        cv2.putText(canvas, "pen", (w-75, hud_h//2+5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 140, 190), 1, cv2.LINE_AA)
+
         # ── 오버레이: 카운트다운
         if state == STATE_COUNTDOWN:
-            elapsed   = now - countdown_start
-            remaining = int(COUNTDOWN_SEC - elapsed) + 1
-            remaining = max(1, remaining)
-            # 반투명 원
-            overlay = canvas.copy()
+            elapsed_cd  = now - countdown_start
+            num_show    = max(1, int(COUNTDOWN_SEC - elapsed_cd) + 1)
+            progress_cd = 1.0 - (elapsed_cd % 1.0)
             cx, cy = w // 2, h // 2
-            cv2.circle(overlay, (cx, cy), 90, ACCENT_COLOR, -1)
-            cv2.addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas)
-            tw = cv2.getTextSize(str(remaining), cv2.FONT_HERSHEY_DUPLEX, 5, 8)[0][0]
-            cv2.putText(canvas, str(remaining),
-                        (cx - tw//2, cy + 35),
-                        cv2.FONT_HERSHEY_DUPLEX, 5, (255,255,255), 8, cv2.LINE_AA)
+            # 반투명 다크 원
+            ov_cd = canvas.copy()
+            cv2.circle(ov_cd, (cx, cy), 115, DARK, -1)
+            cv2.addWeighted(ov_cd, 0.78, canvas, 0.22, 0, canvas)
+            # 링 트랙
+            cv2.circle(canvas, (cx, cy), 92, (80, 60, 110), 8)
+            # 진행 호
+            arc_angle = int(360 * progress_cd)
+            cv2.ellipse(canvas, (cx, cy), (92, 92), -90, 0, arc_angle, ACCENT, 8)
+            # 외곽 빛 링
+            cv2.circle(canvas, (cx, cy), 100, PINK, 2)
+            # 숫자
+            tw_cd = cv2.getTextSize(str(num_show), cv2.FONT_HERSHEY_DUPLEX, 4.5, 8)[0][0]
+            cv2.putText(canvas, str(num_show),
+                        (cx - tw_cd//2, cy + 32),
+                        cv2.FONT_HERSHEY_DUPLEX, 4.5, WHITE, 8, cv2.LINE_AA)
 
         # ── 오버레이: 플래시
         elif state == STATE_FLASH:
             ratio = 1.0 - (now - flash_start) / FLASH_SEC
-            overlay = np.full_like(canvas, 255)
-            cv2.addWeighted(overlay, ratio * 0.8, canvas, 1 - ratio * 0.8, 0, canvas)
+            wh_ov = np.full_like(canvas, 255)
+            cv2.addWeighted(wh_ov, ratio * 0.85, canvas, 1 - ratio * 0.85, 0, canvas)
 
         # ── 오버레이: 완료 화면
         elif state == STATE_DONE:
-            msg1 = "DONE!  Fist to Retry"
-            tw = cv2.getTextSize(msg1, cv2.FONT_HERSHEY_DUPLEX, 0.9, 2)[0][0]
-            draw_rounded_rect(canvas,
-                              (w//2 - tw//2 - 20, h - 55),
-                              (w//2 + tw//2 + 20, h - 15),
-                              (60, 20, 100), radius=10, thickness=-1)
-            cv2.putText(canvas, msg1,
-                        (w//2 - tw//2, h - 25),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.9, (255, 230, 255), 2, cv2.LINE_AA)
+            ov_done = canvas.copy()
+            cv2.rectangle(ov_done, (0, h//2-80), (w, h//2+80), DARK, -1)
+            cv2.addWeighted(ov_done, 0.82, canvas, 0.18, 0, canvas)
+            draw_rounded_rect(canvas, (w//2-160, h//2-70), (w//2+160, h//2+70),
+                              DARK, radius=20, thickness=-1)
+            draw_rounded_rect(canvas, (w//2-160, h//2-70), (w//2+160, h//2+70),
+                              ACCENT, radius=20, thickness=2)
+            msg_d = "SAVED!"
+            tw_d = cv2.getTextSize(msg_d, cv2.FONT_HERSHEY_DUPLEX, 2.4, 5)[0][0]
+            cv2.putText(canvas, msg_d, (w//2 - tw_d//2, h//2),
+                        cv2.FONT_HERSHEY_DUPLEX, 2.4, GOLD, 5, cv2.LINE_AA)
+            sub_d = "Fist to retry  |  ESC to quit"
+            sw_d  = cv2.getTextSize(sub_d, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
+            cv2.putText(canvas, sub_d, (w//2 - sw_d//2, h//2 + 45),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, PINK, 1, cv2.LINE_AA)
+            # 반짝이 파티클
+            rng_sp = np.random.default_rng(int(now * 5) % 999)
+            for _ in range(14):
+                sx = int(rng_sp.integers(20, w-20))
+                sy = int(rng_sp.integers(20, h-20))
+                sr = int(rng_sp.integers(2, 6))
+                sc = [ACCENT, GOLD, PINK, WHITE][int(rng_sp.integers(0, 4))]
+                cv2.circle(canvas, (sx, sy), sr, sc, -1)
 
-        # ── 오버레이: 대기 안내
+        # ── 오버레이: 대기 안내 (하단 HUD)
         elif state == STATE_WAITING:
-            shot_num = len(photos) + 1
-            msg = f"Shot {shot_num}/{TOTAL_SHOTS}  -  Peace:Capture  Point:Draw  Open:Clear"
-            if gesture == 'peace' and gesture_start:
-                held = now - gesture_start
-                bar_w = int(min(held / GESTURE_HOLD, 1.0) * (w - 40))
-                cv2.rectangle(canvas, (20, h-20), (w-20, h-10), (200,180,255), -1)
-                cv2.rectangle(canvas, (20, h-20), (20+bar_w, h-10), ACCENT_COLOR, -1)
-            tw = cv2.getTextSize(msg, cv2.FONT_HERSHEY_DUPLEX, 0.75, 2)[0][0]
-            cv2.putText(canvas, msg,
-                        (w//2 - tw//2, 38),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.75, (255,255,255), 2, cv2.LINE_AA)
+            hud2_y = h - 58
+            ov_w = canvas.copy()
+            cv2.rectangle(ov_w, (0, hud2_y), (w, h), DARK, -1)
+            cv2.addWeighted(ov_w, 0.72, canvas, 0.28, 0, canvas)
+            cv2.line(canvas, (0, hud2_y), (w, hud2_y), PINK, 1)
 
-        # ── 제스처 표시
-        if gesture:
-            icons = {'peace': 'PEACE', 'fist': 'FIST', 'open': 'OPEN (Clear)', 'point': 'POINT (Draw)'}
-            label = icons.get(gesture, gesture.upper())
-            cv2.putText(canvas, label, (10, h - 30),
-                        cv2.FONT_HERSHEY_DUPLEX, 0.7, ACCENT_COLOR, 2, cv2.LINE_AA)
+            if gesture == 'peace' and gesture_start is not None:
+                held  = now - gesture_start
+                ratio = min(held / GESTURE_HOLD, 1.0)
+                bx1, bx2 = 20, w - 20
+                by = h - 18
+                cv2.rectangle(canvas, (bx1, by-7), (bx2, by+7), (70, 55, 95), -1)
+                fill_x = bx1 + int((bx2-bx1)*ratio)
+                cv2.rectangle(canvas, (bx1, by-7), (fill_x, by+7), ACCENT, -1)
+                cv2.rectangle(canvas, (bx1, by-7), (bx2, by+7), PINK, 1)
+                gm = "Hold peace to capture..."
+                cv2.putText(canvas, gm, (bx1, h-28),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, WHITE, 1, cv2.LINE_AA)
+            else:
+                hints = [("PEACE","capture"),("POINT","draw"),("FIST","color"),("OPEN","clear")]
+                seg_w = w // len(hints)
+                for hi, (gn, gd) in enumerate(hints):
+                    cx_g = hi * seg_w + seg_w // 2
+                    active = gesture and gesture.upper() == gn
+                    col_g  = ACCENT if active else (150, 130, 180)
+                    nw_g   = cv2.getTextSize(gn, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 2)[0][0]
+                    cv2.putText(canvas, gn, (cx_g - nw_g//2, h-34),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.52, col_g, 2, cv2.LINE_AA)
+                    dw_g = cv2.getTextSize(gd, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)[0][0]
+                    cv2.putText(canvas, gd, (cx_g - dw_g//2, h-14),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 95, 140), 1, cv2.LINE_AA)
+
+        # ── 구분선 (카메라 / 스트립 경계)
+        cv2.line(canvas, (w, 0), (w, h), PINK, 2)
 
         cv2.imshow('PhotoBooth', canvas)
         if cv2.waitKey(1) == 27:

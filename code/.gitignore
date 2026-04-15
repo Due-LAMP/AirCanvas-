@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+photobooth_debug.log
+photobooth_output/

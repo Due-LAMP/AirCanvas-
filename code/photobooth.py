@@ -298,10 +298,12 @@ def save_final(photos, cam_h, strip_w):
 STATE_WAITING    = 'waiting'    # 다음 촬영 대기
 STATE_COUNTDOWN  = 'countdown'  # 카운트다운 진행 중
 STATE_FLASH      = 'flash'      # 촬영 직후 플래시
-STATE_DONE       = 'done'       # 4장 완료
+STATE_DONE       = 'done'       # 4장 완료 (레거시 호환)
+STATE_REVIEW     = 'review'     # 최종 사진 리뷰 화면
 
 state          = STATE_WAITING
 photos         = []             # 촬영된 사진 리스트
+review_collage = None           # 리뷰 화면에 표시할 최종 콜라주
 countdown_start = None
 flash_start    = None
 last_gesture   = None
@@ -434,10 +436,11 @@ with GestureRecognizer.create_from_options(options) as recognizer:
 
         last_standby = (gesture == 'fist')
 
-        if gesture == 'open' and state in (STATE_WAITING, STATE_DONE):
-            if state == STATE_DONE or last_gesture != 'open':
-                if state == STATE_DONE:
+        if gesture == 'open' and state in (STATE_WAITING, STATE_DONE, STATE_REVIEW):
+            if state in (STATE_DONE, STATE_REVIEW) or last_gesture != 'open':
+                if state in (STATE_DONE, STATE_REVIEW):
                     photos = []
+                    review_collage = None
                     draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
                     state = STATE_WAITING
                     print("초기화 완료")
@@ -468,7 +471,11 @@ with GestureRecognizer.create_from_options(options) as recognizer:
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:
-                state = STATE_DONE if len(photos) >= TOTAL_SHOTS else STATE_WAITING
+                if len(photos) >= TOTAL_SHOTS:
+                    review_collage = make_final_collage(photos)
+                    state = STATE_REVIEW
+                else:
+                    state = STATE_WAITING
 
         # ── 그리기 캔버스를 카메라 프레임에 합성
         mask = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
@@ -539,7 +546,7 @@ with GestureRecognizer.create_from_options(options) as recognizer:
             wh_ov = np.full_like(canvas, 255)
             cv2.addWeighted(wh_ov, ratio * 0.85, canvas, 1 - ratio * 0.85, 0, canvas)
 
-        # ── 오버레이: 완료 화면
+        # ── 오버레이: 완료 화면 (레거시 - STATE_REVIEW로 대체됨)
         elif state == STATE_DONE:
             ov_done = canvas.copy()
             cv2.rectangle(ov_done, (0, h//2-80), (w, h//2+80), DARK, -1)
@@ -552,18 +559,64 @@ with GestureRecognizer.create_from_options(options) as recognizer:
             tw_d = cv2.getTextSize(msg_d, cv2.FONT_HERSHEY_DUPLEX, 2.4, 5)[0][0]
             cv2.putText(canvas, msg_d, (w//2 - tw_d//2, h//2),
                         cv2.FONT_HERSHEY_DUPLEX, 2.4, GOLD, 5, cv2.LINE_AA)
-            sub_d = "Fist to retry  |  ESC to quit"
+            sub_d = "Open palm : New Session  |  ESC : Quit"
             sw_d  = cv2.getTextSize(sub_d, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
             cv2.putText(canvas, sub_d, (w//2 - sw_d//2, h//2 + 45),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, PINK, 1, cv2.LINE_AA)
-            # 반짝이 파티클
-            rng_sp = np.random.default_rng(int(now * 5) % 999)
-            for _ in range(14):
-                sx = int(rng_sp.integers(20, w-20))
-                sy = int(rng_sp.integers(20, h-20))
-                sr = int(rng_sp.integers(2, 6))
-                sc = [ACCENT, GOLD, PINK, WHITE][int(rng_sp.integers(0, 4))]
-                cv2.circle(canvas, (sx, sy), sr, sc, -1)
+
+        # ── 오버레이: 리뷰 화면 (4장 완료 후 최종 사진 표시)
+        elif state == STATE_REVIEW:
+            if review_collage is not None:
+                # 왼쪽 카메라 영역을 다크 배경으로 교체
+                canvas[:, :w] = (30, 20, 45)
+
+                # 콜라주 비율 유지하며 왼쪽 영역에 맞게 리사이즈
+                col_h_orig, col_w_orig = review_collage.shape[:2]
+                avail_h = h - 56 - 52   # 상단 타이틀 + 하단 안내 공간 제외
+                avail_w = w - 40
+                scale = min(avail_h / col_h_orig, avail_w / col_w_orig)
+                new_h = int(col_h_orig * scale)
+                new_w = int(col_w_orig * scale)
+                col_resized = cv2.resize(review_collage, (new_w, new_h))
+
+                # 중앙 배치
+                y_off = 56 + (avail_h - new_h) // 2
+                x_off = (w - new_w) // 2
+                canvas[y_off:y_off+new_h, x_off:x_off+new_w] = col_resized
+
+                # 콜라주 테두리 효과
+                draw_rounded_rect(canvas, (x_off-4, y_off-4),
+                                  (x_off+new_w+4, y_off+new_h+4),
+                                  ACCENT, radius=8, thickness=2)
+
+                # 상단 타이틀 바
+                ov_rt = canvas.copy()
+                cv2.rectangle(ov_rt, (0, 0), (w, 52), DARK, -1)
+                cv2.addWeighted(ov_rt, 0.85, canvas, 0.15, 0, canvas)
+                cv2.line(canvas, (0, 52), (w, 52), PINK, 1)
+                title_r = "YOUR 4-CUT"
+                trw = cv2.getTextSize(title_r, cv2.FONT_HERSHEY_DUPLEX, 1.2, 2)[0][0]
+                cv2.putText(canvas, title_r, (w//2 - trw//2, 38),
+                            cv2.FONT_HERSHEY_DUPLEX, 1.2, GOLD, 2, cv2.LINE_AA)
+
+                # 하단 안내 바
+                ov_rb = canvas.copy()
+                cv2.rectangle(ov_rb, (0, h-52), (w, h), DARK, -1)
+                cv2.addWeighted(ov_rb, 0.80, canvas, 0.20, 0, canvas)
+                cv2.line(canvas, (0, h-52), (w, h-52), PINK, 1)
+                hint_r = "Open (palm) : New Session  |  ESC : Quit"
+                hrw = cv2.getTextSize(hint_r, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
+                cv2.putText(canvas, hint_r, (w//2 - hrw//2, h-18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
+
+                # 반짝이 파티클 (상단 타이틀 영역)
+                rng_rv = np.random.default_rng(int(now * 4) % 999)
+                for _ in range(10):
+                    sx = int(rng_rv.integers(10, w-10))
+                    sy = int(rng_rv.integers(4, 48))
+                    sr = int(rng_rv.integers(2, 5))
+                    sc = [ACCENT, GOLD, PINK, WHITE][int(rng_rv.integers(0, 4))]
+                    cv2.circle(canvas, (sx, sy), sr, sc, -1)
 
         # ── 오버레이: 대기 안내 (하단 HUD)
         elif state == STATE_WAITING:

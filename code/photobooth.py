@@ -27,21 +27,29 @@ except ImportError:
     HAS_PICAMERA2 = False
 
 # ── Mediapipe 설정 ──────────────────────────────────────────────
-BaseOptions = mp.tasks.BaseOptions
-HandLandmarker = mp.tasks.vision.HandLandmarker
-HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
-RunningMode = mp.tasks.vision.RunningMode
-HAND_CONNECTIONS = mp.solutions.hands.HAND_CONNECTIONS
+BaseOptions          = mp.tasks.BaseOptions
+GestureRecognizer    = mp.tasks.vision.GestureRecognizer
+GestureRecognizerOptions = mp.tasks.vision.GestureRecognizerOptions
+RunningMode          = mp.tasks.vision.RunningMode
+HAND_CONNECTIONS     = mp.solutions.hands.HAND_CONNECTIONS
 
-model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hand_landmarker.task')
+model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gesture_recognizer.task')
 
-options = HandLandmarkerOptions(
+options = GestureRecognizerOptions(
     base_options=BaseOptions(model_asset_path=model_path),
     num_hands=1,
     min_hand_detection_confidence=0.5,
     min_tracking_confidence=0.5,
     running_mode=RunningMode.VIDEO,
 )
+
+# MediaPipe 제스처명 → 내부 제스처명 매핑
+# Closed_Fist → fist, Victory → peace, Open_Palm → open, 나머지 → None(그리기)
+_GESTURE_MAP = {
+    'Closed_Fist': 'fist',
+    'Victory':     'peace',
+    'Open_Palm':   'open',
+}
 
 # ── 상수 ────────────────────────────────────────────────────────
 TOTAL_SHOTS   = 4          # 총 촬영 장수
@@ -76,33 +84,6 @@ PEN_COLORS = [
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photobooth_output')
 os.makedirs(SAVE_DIR, exist_ok=True)
 
-
-# ── 손가락 인식 ─────────────────────────────────────────────────
-def get_finger_status(landmarks):
-    fingers = []
-    if landmarks[4].x < landmarks[3].x:
-        fingers.append(1)
-    else:
-        fingers.append(0)
-    for tip, pip_j in zip([8, 12, 16, 20], [6, 10, 14, 18]):
-        fingers.append(1 if landmarks[tip].y < landmarks[pip_j].y else 0)
-    return fingers
-
-
-def recognize_gesture(fingers_status):
-    thumb, index, middle, ring, pinky = fingers_status
-    if fingers_status == [0, 0, 0, 0, 0]:
-        return 'fist'
-    elif fingers_status == [1, 1, 1, 1, 1]:
-        return 'open'
-    elif fingers_status == [0, 1, 1, 0, 0]:
-        return 'peace'
-    elif fingers_status == [1, 1, 0, 0, 0]:
-        return 'standby'
-    # 검지만 펼쳐진 경우: 나머지 손가락 오인식 허용 (새끼/약지 흔들림 무시)
-    elif index == 1 and middle == 0:
-        return 'point'
-    return None
 
 
 # ── 카메라 초기화 ────────────────────────────────────────────────
@@ -350,7 +331,7 @@ print("=" * 50)
 cv2.namedWindow('PhotoBooth', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('PhotoBooth', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-with HandLandmarker.create_from_options(options) as landmarker:
+with GestureRecognizer.create_from_options(options) as recognizer:
     frame_index = 0
 
     while True:
@@ -376,7 +357,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
         ts_ms    = int(frame_index * 1000 / fps)
         frame_index += 1
-        result = landmarker.detect_for_video(mp_image, ts_ms)
+        result = recognizer.recognize_for_video(mp_image, ts_ms)
 
         gesture = None
         if not result.hand_landmarks:
@@ -384,13 +365,14 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 log.warning('hand NOT detected → draw interrupted (prev reset)')
             prev_x, prev_y = None, None
         if result.hand_landmarks:
-            for hand_landmarks in result.hand_landmarks:
-                fingers_status = get_finger_status(hand_landmarks)
-                gesture = recognize_gesture(fingers_status)
+            for i, hand_landmarks in enumerate(result.hand_landmarks):
+                # GestureRecognizer 결과에서 제스처 읽기
+                raw_gesture = result.gestures[i][0].category_name if result.gestures else 'None'
+                gesture = _GESTURE_MAP.get(raw_gesture, None)  # 매핑 없으면 None(=그리기)
 
                 # 제스처 변경 시 로그
                 if gesture != last_gesture:
-                    log.info(f'gesture: {last_gesture} → {gesture}  fingers={fingers_status}')
+                    log.info(f'gesture: {last_gesture} → {gesture}  (raw={raw_gesture})')
 
                 # landmark 8 (검지 끝) 좌표
                 ix = int(hand_landmarks[8].x * w)

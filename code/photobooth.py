@@ -3,7 +3,22 @@ import mediapipe as mp
 import os
 import numpy as np
 import time
+import logging
 from datetime import datetime
+
+# ── 로그 설정 ────────────────────────────────────────────────────
+_log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photobooth_debug.log')
+_file_handler = logging.FileHandler(_log_path, mode='w', encoding='utf-8')
+_file_handler.setLevel(logging.DEBUG)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setLevel(logging.WARNING)   # 터미널엔 WARNING 이상만
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S',
+    handlers=[_file_handler, _stream_handler]
+)
+log = logging.getLogger('photobooth')
 
 try:
     from picamera2 import Picamera2
@@ -75,16 +90,18 @@ def get_finger_status(landmarks):
 
 
 def recognize_gesture(fingers_status):
+    thumb, index, middle, ring, pinky = fingers_status
     if fingers_status == [0, 0, 0, 0, 0]:
         return 'fist'
-    elif fingers_status == [0, 1, 0, 0, 0]:
-        return 'point'
     elif fingers_status == [1, 1, 1, 1, 1]:
         return 'open'
     elif fingers_status == [0, 1, 1, 0, 0]:
         return 'peace'
     elif fingers_status == [1, 1, 0, 0, 0]:
         return 'standby'
+    # 검지만 펼쳐진 경우: 나머지 손가락 오인식 허용 (새끼/약지 흔들림 무시)
+    elif index == 1 and middle == 0:
+        return 'point'
     return None
 
 
@@ -324,7 +341,7 @@ print("=" * 50)
 print("  인생네컷 포토부스")
 print("=" * 50)
 print("  peace (0.8s)  : 촬영")
-print("  point (index) : 그리기")
+print("  hand (default): 그리기 (landmark 8 트래킹)")
 print("  fist          : 펜 색상 변경")
 print("  open          : 그림 지우기 / 완료 시 전체 리셋")
 print("  ESC           : 종료")
@@ -362,38 +379,53 @@ with HandLandmarker.create_from_options(options) as landmarker:
         result = landmarker.detect_for_video(mp_image, ts_ms)
 
         gesture = None
+        if not result.hand_landmarks:
+            if prev_x is not None:
+                log.warning('hand NOT detected → draw interrupted (prev reset)')
+            prev_x, prev_y = None, None
         if result.hand_landmarks:
             for hand_landmarks in result.hand_landmarks:
                 fingers_status = get_finger_status(hand_landmarks)
                 gesture = recognize_gesture(fingers_status)
 
-                # 검지 끝(landmark 8) 좌표
+                # 제스처 변경 시 로그
+                if gesture != last_gesture:
+                    log.info(f'gesture: {last_gesture} → {gesture}  fingers={fingers_status}')
+
+                # landmark 8 (검지 끝) 좌표
                 ix = int(hand_landmarks[8].x * w)
                 iy = int(hand_landmarks[8].y * h)
 
-                # 그리기 제스처 처리
-                if gesture in ('point', 'standby'):
-                    if prev_x is not None and prev_y is not None:
-                        cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
-                    prev_x, prev_y = ix, iy
-                elif gesture == 'fist':
+                # 특수 제스처 처리
+                if gesture == 'fist':
                     # 첫 진입 시 펜 색상 한 단계 전환
                     if last_gesture != 'fist':
                         color_idx = (color_idx + 1) % len(PEN_COLORS)
                         drawing_color = PEN_COLORS[color_idx]
+                        log.info(f'color changed → {drawing_color}')
                     prev_x, prev_y = None, None
                 elif gesture == 'open':
+                    log.info('canvas cleared')
                     draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
                     prev_x, prev_y = None, None
-                else:
+                elif gesture == 'peace':
+                    # 촬영 트리거 - 그리기 일시 중단
                     prev_x, prev_y = None, None
+                else:
+                    # landmark 8 트래킹으로 항상 그리기
+                    if prev_x is not None and prev_y is not None:
+                        cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
+                        log.debug(f'draw ({prev_x},{prev_y})→({ix},{iy})')
+                    else:
+                        log.debug(f'draw START at ({ix},{iy})')
+                    prev_x, prev_y = ix, iy
 
-                # 그리기 커서 (링 스타일)
-                if gesture in ('point', 'standby'):
+                # 그리기 커서
+                if gesture in ('fist', 'open', 'peace'):
+                    cv2.circle(frame, (ix, iy), 11, (200, 200, 200), 1)
+                else:
                     cv2.circle(frame, (ix, iy), line_thickness + 5, drawing_color, 2)
                     cv2.circle(frame, (ix, iy), 3, drawing_color, -1)
-                else:
-                    cv2.circle(frame, (ix, iy), 11, (200, 200, 200), 1)
 
                 # 랜드마크 그리기
                 for connection in HAND_CONNECTIONS:
@@ -419,9 +451,6 @@ with HandLandmarker.create_from_options(options) as landmarker:
             gesture_start = None
 
         last_standby = (gesture == 'fist')
-
-        if gesture not in ('point', 'standby') and gesture != 'peace':
-            prev_x, prev_y = None, None
 
         if gesture == 'open' and state in (STATE_WAITING, STATE_DONE):
             if state == STATE_DONE or last_gesture != 'open':
@@ -575,7 +604,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 cv2.putText(canvas, gm, (bx1, h-28),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, WHITE, 1, cv2.LINE_AA)
             else:
-                hints = [("PEACE","capture"),("POINT","draw"),("FIST","color"),("OPEN","clear")]
+                hints = [("PEACE","capture"),("HAND","draw"),("FIST","color"),("OPEN","clear")]
                 seg_w = w // len(hints)
                 for hi, (gn, gd) in enumerate(hints):
                     cx_g = hi * seg_w + seg_w // 2

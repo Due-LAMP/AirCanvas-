@@ -1,4 +1,7 @@
 venv/
+.venv/
+env/
+aircanvas/
 __pycache__/
 *.pyc
 *.pyo

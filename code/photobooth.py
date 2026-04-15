@@ -372,7 +372,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
                 iy = int(hand_landmarks[8].y * h)
 
                 # 그리기 제스처 처리
-                if gesture == 'point':
+                if gesture in ('point', 'standby'):
                     if prev_x is not None and prev_y is not None:
                         cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
                     prev_x, prev_y = ix, iy
@@ -389,7 +389,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
                     prev_x, prev_y = None, None
 
                 # 그리기 커서 (링 스타일)
-                if gesture == 'point':
+                if gesture in ('point', 'standby'):
                     cv2.circle(frame, (ix, iy), line_thickness + 5, drawing_color, 2)
                     cv2.circle(frame, (ix, iy), 3, drawing_color, -1)
                 else:
@@ -420,7 +420,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
 
         last_standby = (gesture == 'fist')
 
-        if gesture not in ('point',) and gesture != 'peace':
+        if gesture not in ('point', 'standby') and gesture != 'peace':
             prev_x, prev_y = None, None
 
         if gesture == 'open' and state in (STATE_WAITING, STATE_DONE):

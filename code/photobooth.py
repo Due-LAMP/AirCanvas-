@@ -4,7 +4,15 @@ import os
 import numpy as np
 import time
 import logging
+import signal
 from datetime import datetime
+
+# ── Ctrl+C 안전 종료 ──────────────────────────────────────────
+_exit_requested = False
+def _sigint_handler(sig, frame):
+    global _exit_requested
+    _exit_requested = True
+signal.signal(signal.SIGINT, _sigint_handler)
 
 # ── 로그 설정 ────────────────────────────────────────────────────
 _log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photobooth_debug.log')
@@ -250,10 +258,27 @@ def make_final_collage(photos):
     return collage
 
 
-def save_final(photos, cam_h, strip_w):
-    """개별 사진 4장 + 인생네컷 합성 이미지 저장"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    session_dir = os.path.join(SAVE_DIR, ts)
+def make_inpaint_mask(draw_canvas):
+    """그린 경계선 안쪽을 채운 inpainting 마스크 반환 (흰색=마스크 영역)"""
+    gray = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
+    _, binary = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
+
+    # 선 두께가 얇아도 윤곽이 닫히도록 약간 팽창
+    kernel = np.ones((line_thickness * 2 + 1, line_thickness * 2 + 1), np.uint8)
+    binary = cv2.dilate(binary, kernel, iterations=1)
+
+    # 외곽 윤곽선을 찾아 내부를 흰색으로 채움
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    mask = np.zeros_like(binary)
+    cv2.drawContours(mask, contours, -1, 255, thickness=cv2.FILLED)
+    return mask
+
+
+def save_final(photos, cam_h, strip_w, masks=None, session_dir=None):
+    """개별 사진 4장 + 인생네컷 합성 이미지 + inpainting 마스크 저장"""
+    if session_dir is None:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_dir = os.path.join(SAVE_DIR, ts)
     os.makedirs(session_dir, exist_ok=True)
 
     # 개별 사진 저장
@@ -261,6 +286,12 @@ def save_final(photos, cam_h, strip_w):
         path = os.path.join(session_dir, f"shot_{i+1}.jpg")
         cv2.imwrite(path, photo)
         print(f"  저장: {path}")
+
+        # inpainting 마스크 저장 (경계선 안쪽이 흰색=마스크)
+        if masks and i < len(masks) and masks[i] is not None:
+            mask_path = os.path.join(session_dir, f"shot_{i+1}_mask.png")
+            cv2.imwrite(mask_path, masks[i])
+            print(f"  마스크 저장: {mask_path}")
 
     # 인생네컷 합성 이미지 저장
     collage = make_final_collage(photos)
@@ -273,6 +304,31 @@ def save_final(photos, cam_h, strip_w):
     return session_dir
 
 
+def _make_video_writer(path, frame_size, fps):
+    """AVI/MJPG VideoWriter 생성 (라즈베리파이 호환)"""
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    writer = cv2.VideoWriter(path, fourcc, fps, frame_size)
+    if writer.isOpened():
+        return writer
+    writer.release()
+    return None
+
+
+def _avi_to_mp4(src_avi, dst_mp4):
+    """ffmpeg으로 AVI → MP4 재인코딩. 성공 시 True, 실패 시 False."""
+    import subprocess, shutil as _sh
+    if not _sh.which('ffmpeg'):
+        return False
+    ret = subprocess.run(
+        ['ffmpeg', '-y', '-i', src_avi,
+         '-vcodec', 'libx264', '-preset', 'fast',
+         '-crf', '23', '-movflags', '+faststart',
+         dst_mp4],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    return ret.returncode == 0
+
+
 # ── 상태 머신 ────────────────────────────────────────────────────
 STATE_WAITING    = 'waiting'    # 다음 촬영 대기
 STATE_COUNTDOWN  = 'countdown'  # 카운트다운 진행 중
@@ -282,6 +338,7 @@ STATE_REVIEW     = 'review'     # 최종 사진 리뷰 화면
 
 state          = STATE_WAITING
 photos         = []             # 촬영된 사진 리스트
+photo_masks    = []             # 각 촬영에 대응하는 inpainting 마스크
 review_collage = None           # 리뷰 화면에 표시할 최종 콜라주
 countdown_start = None
 flash_start    = None
@@ -311,6 +368,11 @@ print("=" * 50)
 
 cv2.namedWindow('PhotoBooth', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('PhotoBooth', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+# ── 녹화 상태 변수 ──────────────────────────────────────────────
+_out_writer   = None   # cv2.VideoWriter
+_session_dir  = None   # save_final 이 생성한 세션 폴더
+_review_cap   = None   # 리뷰 화면에서 재생할 VideoCapture
 
 with GestureRecognizer.create_from_options(options) as recognizer:
     frame_index = 0
@@ -416,9 +478,32 @@ with GestureRecognizer.create_from_options(options) as recognizer:
             if state in (STATE_DONE, STATE_REVIEW) or last_gesture != 'open':
                 if state in (STATE_DONE, STATE_REVIEW):
                     photos = []
+                    photo_masks = []
                     review_collage = None
                     draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
                     state = STATE_WAITING
+                    # 리뷰 재생 캡처 해제
+                    if _review_cap:
+                        _review_cap.release()
+                        _review_cap = None
+                        _vid_play_r = os.path.join(SAVE_DIR, '_recording_play.avi')
+                        if os.path.exists(_vid_play_r):
+                            os.remove(_vid_play_r)
+                    # 현재 녹화 저장 후 새 녹화 시작
+                    if _out_writer and _out_writer is not False:
+                        _out_writer.release()
+                        import shutil as _sh_reset
+                        _vid_tmp_r = os.path.join(SAVE_DIR, '_recording_tmp.avi')
+                        if os.path.exists(_vid_tmp_r) and _session_dir:
+                            os.makedirs(_session_dir, exist_ok=True)
+                            _vid_mp4_r = os.path.join(_session_dir, 'recording.mp4')
+                            _vid_avi_r = os.path.join(_session_dir, 'recording.avi')
+                            if _avi_to_mp4(_vid_tmp_r, _vid_mp4_r):
+                                os.remove(_vid_tmp_r)
+                            else:
+                                _sh_reset.move(_vid_tmp_r, _vid_avi_r)
+                        _out_writer = None   # 다음 프레임에서 새 writer 생성
+                        _session_dir = None
                     print("초기화 완료")
                 else:
                     draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
@@ -438,18 +523,29 @@ with GestureRecognizer.create_from_options(options) as recognizer:
                 canvas_fg = cv2.bitwise_and(draw_canvas, draw_canvas, mask=mask)
                 shot_frame = cv2.add(frame_bg, canvas_fg)
                 photos.append(shot_frame.copy())
+                # 경계선 안쪽 채움 마스크 생성 (캔버스 클리어 전)
+                photo_masks.append(make_inpaint_mask(draw_canvas))
                 state = STATE_FLASH
                 flash_start = now
                 draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)  # 촬영 후 캔버스 초기화
                 print(f"[{len(photos)}/{TOTAL_SHOTS}] 촬영!")
                 if len(photos) >= TOTAL_SHOTS:
-                    save_final(photos, h, STRIP_W)
+                    ts_s = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    _session_dir = os.path.join(SAVE_DIR, ts_s)
+                    save_final(photos, h, STRIP_W, masks=photo_masks, session_dir=_session_dir)
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:
                 if len(photos) >= TOTAL_SHOTS:
                     review_collage = make_final_collage(photos)
                     state = STATE_REVIEW
+                    # ── 현재까지 녹화본을 복사해 재생용으로 열기 (writer는 계속 유지)
+                    _vid_tmp_rv = os.path.join(SAVE_DIR, '_recording_tmp.avi')
+                    _vid_play   = os.path.join(SAVE_DIR, '_recording_play.avi')
+                    if os.path.exists(_vid_tmp_rv):
+                        import shutil as _sh_cp
+                        _sh_cp.copy2(_vid_tmp_rv, _vid_play)
+                        _review_cap = cv2.VideoCapture(_vid_play)
                 else:
                     state = STATE_WAITING
 
@@ -543,52 +639,84 @@ with GestureRecognizer.create_from_options(options) as recognizer:
         # ── 오버레이: 리뷰 화면 (4장 완료 후 최종 사진 표시)
         elif state == STATE_REVIEW:
             if review_collage is not None:
-                # 왼쪽 카메라 영역을 다크 배경으로 교체
-                canvas[:, :w] = (30, 20, 45)
+                # 전체 캔버스를 다크로
+                canvas[:] = (30, 20, 45)
 
-                # 콜라주 비율 유지하며 왼쪽 영역에 맞게 리사이즈
+                # 영역 분할: 콜라주 40% / 영상 60%
+                total_canvas_w = w + STRIP_W
+                half_w = int(total_canvas_w * 0.4)
+                outer  = 8    # 화면 바깥쪽 여백
+                gap    = 16   # 콜라주↔영상 사이 간격 (절반씩 적용)
+
+                # ── 콜라주 (왼쪽)
+                avail_h = h - 56 - 52
+                avail_w = half_w - outer - gap // 2
                 col_h_orig, col_w_orig = review_collage.shape[:2]
-                avail_h = h - 56 - 52   # 상단 타이틀 + 하단 안내 공간 제외
-                avail_w = w - 40
                 scale = min(avail_h / col_h_orig, avail_w / col_w_orig)
                 new_h = int(col_h_orig * scale)
                 new_w = int(col_w_orig * scale)
                 col_resized = cv2.resize(review_collage, (new_w, new_h))
-
-                # 중앙 배치
                 y_off = 56 + (avail_h - new_h) // 2
-                x_off = (w - new_w) // 2
+                x_off = outer + (avail_w - new_w) // 2
                 canvas[y_off:y_off+new_h, x_off:x_off+new_w] = col_resized
-
-                # 콜라주 테두리 효과
                 draw_rounded_rect(canvas, (x_off-4, y_off-4),
                                   (x_off+new_w+4, y_off+new_h+4),
                                   ACCENT, radius=8, thickness=2)
 
+                # ── 영상 (오른쪽)
+                if _review_cap and _review_cap.isOpened():
+                    ret_v, vframe = _review_cap.read()
+                    if not ret_v:  # 루프
+                        _review_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                        ret_v, vframe = _review_cap.read()
+                    if ret_v and vframe is not None:
+                        vid_avail_w = (w + STRIP_W) - half_w - outer - gap // 2
+                        vh, vw = vframe.shape[:2]
+                        v_scale = min(avail_h / vh, vid_avail_w / vw)
+                        v_new_h = int(vh * v_scale)
+                        v_new_w = int(vw * v_scale)
+                        vframe_r = cv2.resize(vframe, (v_new_w, v_new_h))
+                        v_y = 56 + (avail_h - v_new_h) // 2
+                        v_x = half_w + gap // 2 + (vid_avail_w - v_new_w) // 2
+                        canvas[v_y:v_y+v_new_h, v_x:v_x+v_new_w] = vframe_r
+                        draw_rounded_rect(canvas, (v_x-4, v_y-4),
+                                          (v_x+v_new_w+4, v_y+v_new_h+4),
+                                          PINK, radius=8, thickness=2)
+                        cv2.putText(canvas, 'REPLAY', (v_x + 6, v_y + 24),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, GOLD, 2, cv2.LINE_AA)
+                else:
+                    # 영상 없음 안내
+                    msg = 'No video'
+                    mw = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 1)[0][0]
+                    canvas[h//2-12:h//2+12, half_w:w+STRIP_W] = (50, 40, 70)
+                    cv2.putText(canvas, msg, (half_w + ((w+STRIP_W-half_w)-mw)//2, h//2+8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (120,100,160), 1, cv2.LINE_AA)
+
                 # 상단 타이틀 바
+                total_w = w + STRIP_W
                 ov_rt = canvas.copy()
-                cv2.rectangle(ov_rt, (0, 0), (w, 52), DARK, -1)
+                cv2.rectangle(ov_rt, (0, 0), (total_w, 52), DARK, -1)
                 cv2.addWeighted(ov_rt, 0.85, canvas, 0.15, 0, canvas)
-                cv2.line(canvas, (0, 52), (w, 52), PINK, 1)
+                cv2.line(canvas, (0, 52), (total_w, 52), PINK, 1)
                 title_r = "YOUR 4-CUT"
                 trw = cv2.getTextSize(title_r, cv2.FONT_HERSHEY_DUPLEX, 1.2, 2)[0][0]
-                cv2.putText(canvas, title_r, (w//2 - trw//2, 38),
+                cv2.putText(canvas, title_r, (total_w//2 - trw//2, 38),
                             cv2.FONT_HERSHEY_DUPLEX, 1.2, GOLD, 2, cv2.LINE_AA)
 
                 # 하단 안내 바
                 ov_rb = canvas.copy()
-                cv2.rectangle(ov_rb, (0, h-52), (w, h), DARK, -1)
+                cv2.rectangle(ov_rb, (0, h-52), (total_w, h), DARK, -1)
                 cv2.addWeighted(ov_rb, 0.80, canvas, 0.20, 0, canvas)
-                cv2.line(canvas, (0, h-52), (w, h-52), PINK, 1)
+                cv2.line(canvas, (0, h-52), (total_w, h-52), PINK, 1)
                 hint_r = "Open (palm) : New Session  |  ESC : Quit"
                 hrw = cv2.getTextSize(hint_r, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
-                cv2.putText(canvas, hint_r, (w//2 - hrw//2, h-18),
+                cv2.putText(canvas, hint_r, (total_w//2 - hrw//2, h-18),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
 
                 # 반짝이 파티클 (상단 타이틀 영역)
                 rng_rv = np.random.default_rng(int(now * 4) % 999)
                 for _ in range(10):
-                    sx = int(rng_rv.integers(10, w-10))
+                    sx = int(rng_rv.integers(10, total_w-10))
                     sy = int(rng_rv.integers(4, 48))
                     sr = int(rng_rv.integers(2, 5))
                     sc = [ACCENT, GOLD, PINK, WHITE][int(rng_rv.integers(0, 4))]
@@ -628,12 +756,57 @@ with GestureRecognizer.create_from_options(options) as recognizer:
                     cv2.putText(canvas, gd, (cx_g - dw_g//2, h-14),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.38, (110, 95, 140), 1, cv2.LINE_AA)
 
-        # ── 구분선 (카메라 / 스트립 경계)
-        cv2.line(canvas, (w, 0), (w, h), PINK, 2)
+        # ── 구분선 (카메라 / 스트립 경계) - 리뷰 화면에서는 숨김
+        if state != STATE_REVIEW:
+            cv2.line(canvas, (w, 0), (w, h), PINK, 2)
+
+        # ── 녹화: VideoWriter 초기화 (첫 프레임에서 크기 확정 후 생성)
+        if _out_writer is None:
+            _canvas_h, _canvas_w = canvas.shape[:2]
+            _vid_tmp = os.path.join(SAVE_DIR, '_recording_tmp.avi')
+            _out_writer = _make_video_writer(_vid_tmp, (_canvas_w, _canvas_h), fps)
+            if _out_writer:
+                print(f"[녹화 시작] {_vid_tmp}")
+            else:
+                print("[경고] VideoWriter 초기화 실패 — 녹화 비활성화")
+                _out_writer = False  # 재시도 방지
+        if _out_writer:
+            _out_writer.write(canvas)
 
         cv2.imshow('PhotoBooth', canvas)
-        if cv2.waitKey(1) == 27:
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27 or key == ord('q') or _exit_requested:  # ESC / q / Ctrl+C
             break
+
+# ── 녹화 종료 및 저장 ─────────────────────────────────────────
+# _review_cap 해제 (혹시 남아 있을 경우)
+if _review_cap:
+    _review_cap.release()
+    # 재생용 임시 복사본 삭제
+    _vid_play_cleanup = os.path.join(SAVE_DIR, '_recording_play.avi')
+    if os.path.exists(_vid_play_cleanup):
+        os.remove(_vid_play_cleanup)
+
+import shutil as _shutil
+_vid_tmp = os.path.join(SAVE_DIR, '_recording_tmp.avi')
+
+# 녹화 종료 및 세션 폴더에 저장
+if _out_writer and _out_writer is not False:
+    _out_writer.release()
+    _ts_end  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if _session_dir is None:
+        _session_dir = os.path.join(SAVE_DIR, _ts_end)
+    os.makedirs(_session_dir, exist_ok=True)
+    if os.path.exists(_vid_tmp):
+        _vid_mp4 = os.path.join(_session_dir, 'recording.mp4')
+        _vid_avi = os.path.join(_session_dir, 'recording.avi')
+        print("[녹화 변환 중...]")
+        if _avi_to_mp4(_vid_tmp, _vid_mp4):
+            os.remove(_vid_tmp)
+            print(f"[녹화 저장] {_vid_mp4}  (ffmpeg 재인코딩)")
+        else:
+            _shutil.move(_vid_tmp, _vid_avi)
+            print(f"[녹화 저장] {_vid_avi}  (AVI, ffmpeg 없음)")
 
 if video:
     video.release()

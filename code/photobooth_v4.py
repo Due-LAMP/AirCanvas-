@@ -539,33 +539,12 @@ class CameraView(QWidget):
 
         now = time.time()
 
-        if self.gesture == 'peace' and self.gesture_start is not None:
-            held  = now - self.gesture_start
-            ratio = min(held / GESTURE_HOLD, 1.0)
+        if self.gesture == 'peace':
             bx1, bx2 = 20, w - 20
-            by = h - 18
-
-            # 트랙 (낡은 느낌)
-            track = QRectF(bx1, by - 6, bx2 - bx1, 12)
-            tp = QPainterPath()
-            tp.addRoundedRect(track, 6, 6)
-            p.fillPath(tp, QBrush(QColor(40, 32, 18)))
-            p.setPen(QPen(QColor(140, 110, 55, 60), 1))
-            p.drawPath(tp)
-
-            if ratio > 0:
-                fill = QRectF(bx1, by - 6, (bx2 - bx1) * ratio, 12)
-                fp = QPainterPath()
-                fp.addRoundedRect(fill, 6, 6)
-                grad_fill = QLinearGradient(bx1, 0, bx2, 0)
-                grad_fill.setColorAt(0.0, C_AMBER2)
-                grad_fill.setColorAt(1.0, C_AMBER)
-                p.fillPath(fp, QBrush(grad_fill))
-
-            p.setFont(QFont("Georgia", 9, QFont.Bold))
-            p.setPen(C_CREAM)
-            p.drawText(QRectF(bx1, hud2_y + 8, bx2 - bx1, 20),
-                       Qt.AlignCenter, "✌  hold  to  snap...")
+            p.setFont(QFont("Georgia", 10, QFont.Bold))
+            p.setPen(C_AMBER)
+            p.drawText(QRectF(bx1, hud2_y + 4, bx2 - bx1, hud2_h - 8),
+                       Qt.AlignCenter, "✌  peace  —  snapping!")
         else:
             hints = [("✌", "peace", "snap"), ("☝", "hand", "draw"),
                      ("✊", "fist", "ink"), ("🖐", "open", "clear")]
@@ -625,9 +604,9 @@ class CameraView(QWidget):
 
         p.setFont(QFont("Georgia", 17, QFont.Bold))
         p.setPen(QColor(0, 0, 0, 60))
-        p.drawText(QRectF(2, 2, w, title_h), Qt.AlignCenter, "your  4-cut")
+        p.drawText(QRectF(2, 2, w, title_h), Qt.AlignCenter, "AirCanvas-Your 4-cut")
         p.setPen(C_AMBER)
-        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "your  4-cut")
+        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "AirCanvas-Your 4-cut")
 
         # 날짜/시간 (우측)
         p.setFont(QFont("Courier", 8))
@@ -823,7 +802,7 @@ class PhotoboothWindow(QMainWindow):
         print("=" * 50)
         print("  4-CUT PHOTOBOOTH  v4  (Lo-Fi Brown)")
         print("=" * 50)
-        print("  peace (0.8s) : 촬영")
+        print("  peace        : 촬영 (즉시)")
         print("  hand         : 그리기")
         print("  fist         : 잉크 색상 변경")
         print("  open         : 지우기 / 리셋")
@@ -909,12 +888,10 @@ class PhotoboothWindow(QMainWindow):
 
         if gesture == 'peace':
             if self.last_gesture != 'peace':
-                self.gesture_start = now
-            elif now - self.gesture_start >= GESTURE_HOLD:
                 if self.state == STATE_WAITING:
                     self.state = STATE_COUNTDOWN
                     self.countdown_start = now
-                self.gesture_start = now
+            self.gesture_start = now
         else:
             self.gesture_start = None
 

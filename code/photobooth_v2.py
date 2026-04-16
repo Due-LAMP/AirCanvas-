@@ -431,34 +431,13 @@ class CameraView(QWidget):
 
         now = time.time()
 
-        if self.gesture == 'peace' and self.gesture_start is not None:
-            # ── 홀드 프로그레스 바
-            held  = now - self.gesture_start
-            ratio = min(held / GESTURE_HOLD, 1.0)
+        if self.gesture == 'peace':
+            # 즉시 촬영 – 안내 텍스트만 표시
             bx1, bx2 = 24, w - 24
-            by = h - 20
-            bar_rect = QRectF(bx1, by - 8, bx2 - bx1, 16)
-            bar_path = QPainterPath()
-            bar_path.addRoundedRect(bar_rect, 8, 8)
-
-            p.fillPath(bar_path, QBrush(QColor(70, 55, 95)))
-
-            if ratio > 0:
-                fill_rect = QRectF(bx1, by - 8, (bx2 - bx1) * ratio, 16)
-                fill_path = QPainterPath()
-                fill_path.addRoundedRect(fill_rect, 8, 8)
-                grad_fill = QLinearGradient(bx1, 0, bx2, 0)
-                grad_fill.setColorAt(0.0, C_PINK)
-                grad_fill.setColorAt(1.0, C_ACCENT)
-                p.fillPath(fill_path, QBrush(grad_fill))
-
-            p.setPen(QPen(C_PINK, 1))
-            p.drawPath(bar_path)
-
-            p.setFont(QFont("Arial", 9, QFont.Bold))
-            p.setPen(C_WHITE)
-            p.drawText(QRectF(bx1, hud2_y + 6, bx2 - bx1, 22),
-                       Qt.AlignCenter, "✌  Hold  PEACE  to  capture...")
+            p.setFont(QFont("Arial", 10, QFont.Bold))
+            p.setPen(C_ACCENT)
+            p.drawText(QRectF(bx1, hud2_y + 4, bx2 - bx1, hud2_h - 8),
+                       Qt.AlignCenter, "✌  PEACE  —  capturing!")
         else:
             hints = [("✌ PEACE", "capture"), ("☝ HAND", "draw"),
                      ("✊ FIST", "color"), ("🖐 OPEN", "clear")]
@@ -507,7 +486,7 @@ class CameraView(QWidget):
         p.drawLine(0, title_h, w, title_h)
         p.setFont(QFont("Arial", 18, QFont.Bold))
         p.setPen(C_GOLD)
-        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "✨  YOUR  4-CUT  ✨")
+        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "✨  AirCanvas-Your 4-cut  ✨")
 
         # ── 하단 안내 바
         grad_f = QLinearGradient(0, h - foot_h, w, h)
@@ -670,7 +649,7 @@ class PhotoboothWindow(QMainWindow):
         print("=" * 50)
         print("  인생네컷 포토부스  (PyQt5 UI)")
         print("=" * 50)
-        print("  peace (0.8s) : 촬영")
+        print("  peace        : 촬영 (즉시)")
         print("  hand         : 그리기")
         print("  fist         : 펜 색상 변경")
         print("  open         : 그림 지우기 / 리셋")
@@ -752,12 +731,11 @@ class PhotoboothWindow(QMainWindow):
         # ── peace 홀드 타이머
         if gesture == 'peace':
             if self.last_gesture != 'peace':
-                self.gesture_start = now
-            elif now - self.gesture_start >= GESTURE_HOLD:
+                # 첫 인식 즉시 촬영 트리거
                 if self.state == STATE_WAITING:
                     self.state = STATE_COUNTDOWN
                     self.countdown_start = now
-                self.gesture_start = now
+            self.gesture_start = now
         else:
             self.gesture_start = None
 

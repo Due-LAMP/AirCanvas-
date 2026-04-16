@@ -705,7 +705,7 @@ with GestureRecognizer.create_from_options(options) as recognizer:
                 cv2.rectangle(ov_rt, (0, 0), (total_w, 52), DARK, -1)
                 cv2.addWeighted(ov_rt, 0.85, canvas, 0.15, 0, canvas)
                 cv2.line(canvas, (0, 52), (total_w, 52), PINK, 1)
-                title_r = "YOUR 4-CUT"
+                title_r = "AirCanvas-Your 4-cut"
                 trw = cv2.getTextSize(title_r, cv2.FONT_HERSHEY_DUPLEX, 1.2, 2)[0][0]
                 cv2.putText(canvas, title_r, (total_w//2 - trw//2, 38),
                             cv2.FONT_HERSHEY_DUPLEX, 1.2, GOLD, 2, cv2.LINE_AA)

@@ -596,9 +596,9 @@ class CameraView(QWidget):
         p.setFont(QFont("Courier", 16, QFont.Bold))
         # 그림자
         p.setPen(QColor(0, 220, 255, 50))
-        p.drawText(QRectF(2, 2, w, title_h), Qt.AlignCenter, "YOUR  4-CUT")
+        p.drawText(QRectF(2, 2, w, title_h), Qt.AlignCenter, "AirCanvas-Your 4-cut")
         p.setPen(C_WHITE)
-        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "YOUR  4-CUT")
+        p.drawText(QRectF(0, 0, w, title_h), Qt.AlignCenter, "AirCanvas-Your 4-cut")
         # 우측 날짜
         p.setFont(QFont("Courier", 8))
         p.setPen(QColor(0, 220, 255, 130))
@@ -792,7 +792,7 @@ class PhotoboothWindow(QMainWindow):
         print("=" * 50)
         print("  4-CUT PHOTOBOOTH  v3  (Modern Dark)")
         print("=" * 50)
-        print("  peace (0.8s) : 촬영")
+        print("  peace        : 촬영 (즉시)")
         print("  hand         : 그리기")
         print("  fist         : 펜 색상 변경")
         print("  open         : 그림 지우기 / 리셋")
@@ -872,12 +872,10 @@ class PhotoboothWindow(QMainWindow):
 
         if gesture == 'peace':
             if self.last_gesture != 'peace':
-                self.gesture_start = now
-            elif now - self.gesture_start >= GESTURE_HOLD:
                 if self.state == STATE_WAITING:
                     self.state = STATE_COUNTDOWN
                     self.countdown_start = now
-                self.gesture_start = now
+            self.gesture_start = now
         else:
             self.gesture_start = None
 

@@ -392,19 +392,22 @@ with GestureRecognizer.create_from_options(options) as recognizer:
         if draw_canvas is None:
             draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
-        # ── 손 인식
-        img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-        ts_ms    = int(frame_index * 1000 / fps)
-        frame_index += 1
-        result = recognizer.recognize_for_video(mp_image, ts_ms)
-
+        # ── 손 인식 (4-cut 리뷰 화면에서는 inference 생략)
         gesture = None
-        if not result.hand_landmarks:
+        if state in (STATE_REVIEW, STATE_DONE):
+            prev_x, prev_y = None, None
+        else:
+            img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            ts_ms    = int(frame_index * 1000 / fps)
+            frame_index += 1
+            result = recognizer.recognize_for_video(mp_image, ts_ms)
+
+        if state not in (STATE_REVIEW, STATE_DONE) and not result.hand_landmarks:
             if prev_x is not None:
                 log.warning('hand NOT detected → draw interrupted (prev reset)')
             prev_x, prev_y = None, None
-        if result.hand_landmarks:
+        if state not in (STATE_REVIEW, STATE_DONE) and result.hand_landmarks:
             for i, hand_landmarks in enumerate(result.hand_landmarks):
                 # GestureRecognizer 결과에서 제스처 읽기
                 raw_gesture = result.gestures[i][0].category_name if result.gestures else 'None'
@@ -434,13 +437,17 @@ with GestureRecognizer.create_from_options(options) as recognizer:
                     # 촬영 트리거 - 그리기 일시 중단
                     prev_x, prev_y = None, None
                 else:
-                    # landmark 8 트래킹으로 항상 그리기
-                    if prev_x is not None and prev_y is not None:
-                        cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
-                        log.debug(f'draw ({prev_x},{prev_y})→({ix},{iy})')
+                    # 카운트다운 중에는 그리기 비활성화
+                    if state == STATE_COUNTDOWN:
+                        prev_x, prev_y = None, None
                     else:
-                        log.debug(f'draw START at ({ix},{iy})')
-                    prev_x, prev_y = ix, iy
+                        # landmark 8 트래킹으로 항상 그리기
+                        if prev_x is not None and prev_y is not None:
+                            cv2.line(draw_canvas, (prev_x, prev_y), (ix, iy), drawing_color, line_thickness)
+                            log.debug(f'draw ({prev_x},{prev_y})→({ix},{iy})')
+                        else:
+                            log.debug(f'draw START at ({ix},{iy})')
+                        prev_x, prev_y = ix, iy
 
                 # 그리기 커서
                 if gesture in ('fist', 'open', 'peace'):

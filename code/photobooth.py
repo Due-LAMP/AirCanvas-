@@ -20,11 +20,6 @@ logging.basicConfig(
 )
 log = logging.getLogger('photobooth')
 
-try:
-    from picamera2 import Picamera2
-    HAS_PICAMERA2 = True
-except ImportError:
-    HAS_PICAMERA2 = False
 
 # ── Mediapipe 설정 ──────────────────────────────────────────────
 BaseOptions          = mp.tasks.BaseOptions
@@ -55,7 +50,7 @@ _GESTURE_MAP = {
 TOTAL_SHOTS   = 4          # 총 촬영 장수
 COUNTDOWN_SEC = 3          # 카운트다운 초
 FLASH_SEC     = 0.5        # 촬영 후 플래시 효과 시간
-STRIP_W       = 320        # 오른쪽 스트립 폭
+STRIP_W       = 200        # 오른쪽 스트립 폭
 
 # ── 테마 컬러 (BGR) ─────────────────────────────────────────────
 DARK         = (35,  25,  50)    # 짙은 보라 (HUD, 오버레이)
@@ -87,10 +82,7 @@ os.makedirs(SAVE_DIR, exist_ok=True)
 
 
 # ── 카메라 초기화 ────────────────────────────────────────────────
-picam2 = None
 video  = None
-use_picamera = False
-
 for idx in range(0, 20):
     cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
     if cap.isOpened():
@@ -100,20 +92,7 @@ for idx in range(0, 20):
             video = cap
             break
     cap.release()
-
-if video is None and HAS_PICAMERA2:
-    try:
-        picam2 = Picamera2()
-        config = picam2.create_preview_configuration(main={"format": "RGB888", "size": (640, 480)})
-        picam2.configure(config)
-        picam2.start()
-        use_picamera = True
-        print("Picamera2 (CSI 카메라) 사용")
-    except Exception as e:
-        print(f"Picamera2 실패: {e}")
-        picam2 = None
-
-if not use_picamera and video is None:
+if video is None:
     print("카메라를 찾을 수 없습니다.")
     exit(1)
 
@@ -337,14 +316,11 @@ with GestureRecognizer.create_from_options(options) as recognizer:
     frame_index = 0
 
     while True:
+
         # ── 프레임 읽기
-        if use_picamera:
-            frame = picam2.capture_array()
-            frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        else:
-            ret, frame = video.read()
-            if not ret:
-                break
+        ret, frame = video.read()
+        if not ret:
+            break
 
         frame = cv2.flip(frame, 1)
         h, w, _ = frame.shape
@@ -659,8 +635,6 @@ with GestureRecognizer.create_from_options(options) as recognizer:
         if cv2.waitKey(1) == 27:
             break
 
-if use_picamera and picam2:
-    picam2.stop()
 if video:
     video.release()
 cv2.destroyAllWindows()

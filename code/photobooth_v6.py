@@ -543,7 +543,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 gray_m  = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
                 _, msk  = cv2.threshold(gray_m, 1, 255, cv2.THRESH_BINARY)
                 msk_inv = cv2.bitwise_not(msk)
-                shot    = cv2.add(cv2.bitwise_and(frame, frame, mask=msk_inv),
+                shot    = cv2.add(cv2.bitwise_and(frame_clean, frame_clean, mask=msk_inv),
                                   cv2.bitwise_and(draw_canvas, draw_canvas, mask=msk))
                 photos.append(shot.copy())
                 draw_canvas = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)

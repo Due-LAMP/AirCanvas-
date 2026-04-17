@@ -4,7 +4,7 @@ photobooth_v3.py – Modern Dark Theme
 네온 시안 + 딥 블랙 + 글래스모피즘 스타일
 """
 
-import os, sys, time, signal
+import os, sys, time, signal, threading, queue
 import numpy as np
 
 import cv2
@@ -36,13 +36,30 @@ RunningMode              = mp.tasks.vision.RunningMode
 HAND_CONNECTIONS         = mp.solutions.hands.HAND_CONNECTIONS
 
 _MODEL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gesture_recognizer.task')
-_GESTURE_MAP = {'Closed_Fist': 'fist', 'Victory': 'peace', 'Open_Palm': 'open'}
+_GESTURE_MAP = {
+    'Closed_Fist': 'fist',
+    'Victory':     'victory',
+    'Open_Palm':   'open',
+    'Thumb_Down':  'thumbdown',
+}
+
+# ── 드로우 모드 ───────────────────────────────────────────────
+DRAW_DEFAULT  = 'default'
+DRAW_PAINTING = 'painting'
+DRAW_ERASE    = 'erase'
+
+# ── 색상 팔레트 ──────────────────────────────────────────────
+PALETTE_CX      = 32   # 화면 왼쪽 x 위치
+PALETTE_RADIUS  = 18   # 원 반지름
+PALETTE_SPACING = 46   # 원 간격 (중심 간)
 
 # ── 상수 ───────────────────────────────────────────────────────
 TOTAL_SHOTS   = 4
 COUNTDOWN_SEC = 3
 FLASH_SEC     = 0.5
-GESTURE_HOLD  = 0.8
+HOLD_FIST     = 0.2   # painting ↔ erase 토글
+HOLD_CLEAR    = 0.5   # 전체 캔버스 삭제
+HOLD_PHOTO    = 0.0   # 촬영 트리거 (첫 프레임 즉시)
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photobooth_output')
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -167,6 +184,152 @@ def _draw_glass(p: QPainter, rect: QRectF, radius: float = 10,
     p.drawPath(path)
 
 
+def _palette_positions(h: int) -> list:
+    """팔레트 각 색상 원의 중심 (x, y) 리스트를 반환."""
+    n      = len(PEN_COLORS_CV)
+    total  = n * PALETTE_SPACING
+    start_y = (h - total) // 2 + PALETTE_SPACING // 2
+    return [(PALETTE_CX, start_y + i * PALETTE_SPACING) for i in range(n)]
+
+
+def _draw_color_palette_on_frame(frame, color_idx: int):
+    """OpenCV 프레임 왼쪽에 색상 팔레트를 그린다."""
+    h = frame.shape[0]
+    positions = _palette_positions(h)
+
+    # 팔레트 배경 패널
+    pad = 8
+    py1 = positions[0][1]  - PALETTE_RADIUS - pad
+    py2 = positions[-1][1] + PALETTE_RADIUS + pad
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, py1), (PALETTE_CX * 2 + 6, py2), (15, 18, 30), -1)
+    cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+    cv2.rectangle(frame, (0, py1), (PALETTE_CX * 2 + 6, py2), (0, 200, 220), 1)
+
+    for idx, ((cx, cy), color_cv) in enumerate(zip(positions, PEN_COLORS_CV)):
+        is_selected = (idx == color_idx)
+        r = PALETTE_RADIUS + (3 if is_selected else 0)
+        cv2.circle(frame, (cx, cy), r, color_cv, -1)
+        if is_selected:
+            cv2.circle(frame, (cx, cy), r + 3, (255, 255, 255), 2)
+            cv2.circle(frame, (cx, cy), r + 6, color_cv,        1)
+        else:
+            cv2.circle(frame, (cx, cy), r + 1, (180, 180, 180), 1)
+
+
+def _pencil_hit_palette(ix: int, iy: int, h: int):
+    """(ix, iy)가 팔레트 원 위에 있으면 해당 색상 인덱스를, 아니면 -1을 반환."""
+    for idx, (cx, cy) in enumerate(_palette_positions(h)):
+        if (ix - cx) ** 2 + (iy - cy) ** 2 <= (PALETTE_RADIUS + 6) ** 2:
+            return idx
+    return -1
+
+
+def _draw_mouse_cursor_icon(frame, ix, iy):
+    """검지 끝(ix, iy)에 마우스 포인터 아이콘을 그린다."""
+    s = 28  # 전체 크기
+    # 포인터 외곽 (흰색 채움)
+    pts = np.array([
+        [ix,        iy       ],
+        [ix,        iy + s   ],
+        [ix + s//4, iy + s*3//4],
+        [ix + s//2, iy + s   ],
+        [ix + s*3//5, iy + s - 4],
+        [ix + s//3, iy + s*3//4 - 2],
+        [ix + s*2//3, iy + s*3//4 - 2],
+    ], dtype=np.int32)
+    # 단순 삼각형 포인터
+    tri = np.array([
+        [ix,            iy         ],
+        [ix,            iy + s     ],
+        [ix + s * 2//3, iy + s*2//3],
+    ], dtype=np.int32)
+    cv2.fillPoly(frame, [tri], (255, 255, 255))
+    cv2.polylines(frame, [tri], True, (30, 30, 30), 1, cv2.LINE_AA)
+    # 끝 점 강조
+    cv2.circle(frame, (ix, iy), 3, (0, 200, 255), -1)
+
+
+def _draw_pencil_icon(frame, ix, iy, color_bgr):
+    """검지 끝(ix, iy)에 연필 아이콘을 그린다."""
+    # 연필 크기
+    length = 36
+    tip_len = 10
+    width = 8
+
+    # 연필은 오른쪽 위 방향으로 위치 (끝 = ix, iy)
+    angle = -45  # degree
+    rad = np.deg2rad(angle)
+    dx = int(np.cos(rad) * length)
+    dy = int(np.sin(rad) * length)
+
+    # 연필 몸통 시작점 (끝에서 반대 방향)
+    bx = ix - dx
+    by = iy - dy
+
+    perp_rad = rad + np.pi / 2
+    pw = int(width / 2)
+    pdx = int(np.cos(perp_rad) * pw)
+    pdy = int(np.sin(perp_rad) * pw)
+
+    # 몸통 사각형 꼭짓점
+    pts_body = np.array([
+        [bx + pdx, by + pdy],
+        [bx - pdx, by - pdy],
+        [ix - pdx - int(np.cos(rad) * tip_len), iy - pdy - int(np.sin(rad) * tip_len)],
+        [ix + pdx - int(np.cos(rad) * tip_len), iy + pdy - int(np.sin(rad) * tip_len)],
+    ], dtype=np.int32)
+
+    # 연필 끝 삼각형 꼭짓점
+    tip_base_x = ix - int(np.cos(rad) * tip_len)
+    tip_base_y = iy - int(np.sin(rad) * tip_len)
+    pts_tip = np.array([
+        [tip_base_x + pdx, tip_base_y + pdy],
+        [tip_base_x - pdx, tip_base_y - pdy],
+        [ix, iy],
+    ], dtype=np.int32)
+
+    # 몸통 (선택된 색)
+    cv2.fillPoly(frame, [pts_body], color_bgr)
+    cv2.polylines(frame, [pts_body], True, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # 끝 삼각형 (밝은 살구색)
+    cv2.fillPoly(frame, [pts_tip], (100, 190, 255))
+    cv2.polylines(frame, [pts_tip], True, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # 지우개 끝 (반대쪽 작은 사각형)
+    eraser_pts = np.array([
+        [bx + pdx, by + pdy],
+        [bx - pdx, by - pdy],
+        [bx - pdx + int(np.cos(rad) * 6), by - pdy + int(np.sin(rad) * 6)],
+        [bx + pdx + int(np.cos(rad) * 6), by + pdy + int(np.sin(rad) * 6)],
+    ], dtype=np.int32)
+    cv2.fillPoly(frame, [eraser_pts], (80, 80, 200))
+    cv2.polylines(frame, [eraser_pts], True, (255, 255, 255), 1, cv2.LINE_AA)
+
+    # 연필 심 점
+    cv2.circle(frame, (ix, iy), 2, (50, 50, 50), -1)
+
+
+def _draw_eraser_icon(frame, ix, iy):
+    """검지 끝(ix, iy)에 지우개 아이콘을 그린다."""
+    w2, h2 = 18, 12
+    ox, oy = ix + 5, iy - h2 - 5  # 검지 끝 오른쪽 위에 배치
+
+    # 지우개 몸통 (흰색 사각형)
+    cv2.rectangle(frame, (ox, oy), (ox + w2 * 2, oy + h2 * 2), (220, 220, 255), -1)
+    cv2.rectangle(frame, (ox, oy), (ox + w2 * 2, oy + h2 * 2), (255, 255, 255), 2)
+
+    # 하단 분홍색 줄 (지우개 특징)
+    stripe_y = oy + int(h2 * 1.4)
+    cv2.rectangle(frame, (ox, stripe_y), (ox + w2 * 2, oy + h2 * 2), (130, 100, 255), -1)
+    cv2.line(frame, (ox, stripe_y), (ox + w2 * 2, stripe_y), (255, 255, 255), 1)
+
+    # 검지 끝 연결 점
+    cv2.circle(frame, (ix, iy), 3, (130, 100, 255), -1)
+    cv2.line(frame, (ix, iy), (ox, oy + h2 * 2), (200, 200, 200), 1, cv2.LINE_AA)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  StripPanel – 우측 4컷 미리보기  (모던 다크)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -177,8 +340,11 @@ class StripPanel(QWidget):
         super().__init__(parent)
         self.setFixedWidth(self.STRIP_W)
         self.photos: list = []
+        self._cached_pixmaps: list = []   # 사진 변경 시에만 재변환
 
     def setPhotos(self, photos):
+        if len(photos) != len(self._cached_pixmaps):
+            self._cached_pixmaps = [_cv_to_pixmap(p) for p in photos]
         self.photos = photos
         self.update()
 
@@ -244,7 +410,7 @@ class StripPanel(QWidget):
                 clip = QPainterPath()
                 clip.addRoundedRect(slot_rect, 4, 4)
                 p.setClipPath(clip)
-                p.drawPixmap(slot_rect.toRect(), _cv_to_pixmap(self.photos[i]))
+                p.drawPixmap(slot_rect.toRect(), self._cached_pixmaps[i])
                 p.setClipping(False)
 
                 # 시안 테두리
@@ -337,6 +503,9 @@ class CameraView(QWidget):
         self.gesture:          str | None     = None
         self.gesture_start:    float | None   = None
         self.drawing_color:    QColor         = PEN_COLORS_QC[4]  # 기본 시안
+        self.draw_mode:        str            = DRAW_DEFAULT
+        self.hold_progress:    float          = 0.0   # 0.0–1.0 진행률
+        self.hold_label:       str            = ''
         self.review_pix:       QPixmap | None = None
         self.review_video_pix: QPixmap | None = None
 
@@ -422,19 +591,28 @@ class CameraView(QWidget):
         title_str = f"[ SHOT  {min(self.taken + 1, TOTAL_SHOTS)} / {TOTAL_SHOTS} ]"
         p.drawText(QRectF(0, 0, w, hud_h), Qt.AlignCenter, title_str)
 
-        # 펜 색상 인디케이터 (오른쪽)
-        px, py_pen = w - 34, cy
-        # 외부 링
-        p.setPen(QPen(QColor(0, 220, 255, 80), 1))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPointF(px, py_pen), 16, 16)
-        # 내부 색상
-        p.setBrush(QBrush(self.drawing_color))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(QPointF(px, py_pen), 11, 11)
-        p.setFont(QFont("Arial", 6))
-        p.setPen(QColor(0, 220, 255, 100))
-        p.drawText(QRectF(w - 76, py_pen + 12, 44, 12), Qt.AlignCenter, "PEN")
+        # 드로우 모드 배지 (오른쪽)
+        mode_labels = {DRAW_DEFAULT: ('DEFAULT', QColor(0,220,255)),
+                       DRAW_PAINTING: ('PAINT', QColor(50,230,120)),
+                       DRAW_ERASE:   ('ERASE',  QColor(255,180,30))}
+        m_text, m_color = mode_labels.get(self.draw_mode, ('?', C_GRAY1))
+        badge_w, badge_h2 = 72, 22
+        bx2 = w - 14
+        badge_rect = QRectF(bx2 - badge_w, cy - badge_h2 // 2, badge_w, badge_h2)
+        bp2 = QPainterPath()
+        bp2.addRoundedRect(badge_rect, 11, 11)
+        p.fillPath(bp2, QBrush(QColor(m_color.red(), m_color.green(), m_color.blue(), 40)))
+        p.setPen(QPen(m_color, 1))
+        p.drawPath(bp2)
+        p.setFont(QFont("Courier", 8, QFont.Bold))
+        p.setPen(m_color)
+        p.drawText(badge_rect, Qt.AlignCenter, m_text)
+        # 펜 색상 점
+        if self.draw_mode == DRAW_PAINTING:
+            px2, py2 = bx2 - badge_w - 14, cy
+            p.setBrush(QBrush(self.drawing_color))
+            p.setPen(Qt.NoPen)
+            p.drawEllipse(QPointF(px2, py2), 8, 8)
 
     # ── 카운트다운 ────────────────────────────────
     def _draw_countdown(self, p: QPainter, w: int, h: int):
@@ -495,83 +673,75 @@ class CameraView(QWidget):
 
     # ── 하단 제스처 HUD ───────────────────────────
     def _draw_bottom_hud(self, p: QPainter, w: int, h: int):
-        hud2_h = 60
+        hud2_h = 66
         hud2_y = h - hud2_h
 
         _draw_glass(p, QRectF(0, hud2_y, w, hud2_h), radius=0,
-                    bg=QColor(8, 10, 18, 210),
+                    bg=QColor(8, 10, 18, 220),
                     border=QColor(0, 0, 0, 0))
-        p.setPen(QPen(QColor(0, 220, 255, 80), 1))
+        p.setPen(QPen(QColor(0, 220, 255, 70), 1))
         p.drawLine(0, hud2_y, w, hud2_y)
 
-        now = time.time()
-
-        if self.gesture == 'peace' and self.gesture_start is not None:
-            held  = now - self.gesture_start
-            ratio = min(held / GESTURE_HOLD, 1.0)
-            bx1, bx2 = 20, w - 20
-            by = h - 18
-
-            # 트랙
-            track = QRectF(bx1, by - 6, bx2 - bx1, 12)
+        # ── 홀드 진행 바 ──────────────────────────
+        if self.hold_progress > 0:
+            bx1, bx2 = 16, w - 16
+            by = h - 10
+            track = QRectF(bx1, by - 5, bx2 - bx1, 10)
             tp = QPainterPath()
-            tp.addRoundedRect(track, 6, 6)
+            tp.addRoundedRect(track, 5, 5)
             p.fillPath(tp, QBrush(QColor(20, 25, 40)))
-            p.setPen(QPen(QColor(0, 220, 255, 40), 1))
-            p.drawPath(tp)
-
-            # 진행
-            if ratio > 0:
-                fill = QRectF(bx1, by - 6, (bx2 - bx1) * ratio, 12)
-                fp = QPainterPath()
-                fp.addRoundedRect(fill, 6, 6)
-                grad_fill = QLinearGradient(bx1, 0, bx2, 0)
-                grad_fill.setColorAt(0.0, C_CYAN2)
-                grad_fill.setColorAt(1.0, C_CYAN)
-                p.fillPath(fp, QBrush(grad_fill))
-
-            p.setFont(QFont("Courier", 9, QFont.Bold))
+            fill = QRectF(bx1, by - 5, (bx2 - bx1) * self.hold_progress, 10)
+            fp = QPainterPath()
+            fp.addRoundedRect(fill, 5, 5)
+            gc = QLinearGradient(bx1, 0, bx2, 0)
+            gc.setColorAt(0.0, C_CYAN2)
+            gc.setColorAt(1.0, C_CYAN)
+            p.fillPath(fp, QBrush(gc))
+            p.setFont(QFont("Courier", 8, QFont.Bold))
             p.setPen(C_CYAN)
-            p.drawText(QRectF(bx1, hud2_y + 8, bx2 - bx1, 20),
-                       Qt.AlignCenter, "✌  HOLD  PEACE  TO  CAPTURE")
+            p.drawText(QRectF(0, hud2_y + 4, w, 18), Qt.AlignCenter, self.hold_label)
+            top_h = 26
         else:
-            # 제스처 힌트 버튼 (캡슐형)
-            hints = [("✌", "PEACE", "capture"), ("☝", "HAND", "draw"),
-                     ("✊", "FIST", "color"), ("🖐", "OPEN", "clear")]
-            seg_w = w // len(hints)
-            for hi, (icon, gn, gd_text) in enumerate(hints):
-                cx_g  = hi * seg_w + seg_w // 2
-                active = self.gesture is not None and self.gesture == gn.lower()
+            top_h = 0
 
-                # 버튼 배경 (활성 시 글로우)
-                btn_w, btn_h_item = seg_w - 16, 42
-                bx = hi * seg_w + 8
-                btn_rect = QRectF(bx, hud2_y + (hud2_h - btn_h_item)//2,
-                                  btn_w, btn_h_item)
-                btn_p = QPainterPath()
-                btn_p.addRoundedRect(btn_rect, 8, 8)
-
-                if active:
-                    # 시안 글로우 배경
-                    p.fillPath(btn_p, QBrush(QColor(0, 220, 255, 35)))
-                    p.setPen(QPen(C_CYAN, 1))
-                    p.drawPath(btn_p)
-                else:
-                    p.fillPath(btn_p, QBrush(QColor(18, 22, 38, 160)))
-                    p.setPen(QPen(QColor(0, 220, 255, 30), 1))
-                    p.drawPath(btn_p)
-
-                col_main = C_CYAN if active else C_GRAY1
-                col_sub  = QColor(0, 220, 255, 160) if active else QColor(80, 88, 110)
-
-                p.setFont(QFont("Arial", 10, QFont.Bold if active else QFont.Normal))
-                p.setPen(col_main)
-                p.drawText(QRectF(hi * seg_w, hud2_y + 8, seg_w, 22),
-                           Qt.AlignCenter, f"{icon} {gn}")
-                p.setFont(QFont("Courier", 7))
-                p.setPen(col_sub)
-                p.drawText(QRectF(hi * seg_w, hud2_y + 32, seg_w, 16),
-                           Qt.AlignCenter, gd_text)
+        # ── 제스처 힌트 버튼 ──────────────────────
+        # (icon, label, gesture_key, accent_color)
+        hints = [
+            ("🖐", "OPEN",  "open",     QColor(  0, 220, 255)),
+            ("✊", "FIST",  "fist",     QColor( 50, 230, 120)),
+            ("👎", "CLEAR", "thumbdown", QColor(255, 180,  30)),
+            ("✌", "PHOTO", "victory",   QColor(120,  60, 255)),
+        ]
+        seg_w = w // len(hints)
+        btn_area_h = hud2_h - top_h - 4
+        for hi, (icon, gn, gk, acol) in enumerate(hints):
+            active = self.gesture == gk
+            btn_w2, btn_h2 = seg_w - 14, btn_area_h - 4
+            bx = hi * seg_w + 7
+            by2 = hud2_y + top_h + 2
+            btn_rect = QRectF(bx, by2, btn_w2, btn_h2)
+            bp3 = QPainterPath()
+            bp3.addRoundedRect(btn_rect, 7, 7)
+            if active:
+                p.fillPath(bp3, QBrush(QColor(acol.red(), acol.green(), acol.blue(), 45)))
+                p.setPen(QPen(acol, 1.2))
+                p.drawPath(bp3)
+            else:
+                p.fillPath(bp3, QBrush(QColor(18, 22, 38, 140)))
+                p.setPen(QPen(QColor(acol.red(), acol.green(), acol.blue(), 35), 1))
+                p.drawPath(bp3)
+            col_main = acol if active else C_GRAY1
+            col_sub  = QColor(acol.red(), acol.green(), acol.blue(), 160) if active else QColor(70, 78, 100)
+            p.setFont(QFont("Arial", 10, QFont.Bold if active else QFont.Normal))
+            p.setPen(col_main)
+            p.drawText(QRectF(hi * seg_w, by2, seg_w, btn_h2 * 0.58),
+                       Qt.AlignCenter, f"{icon} {gn}")
+            hint_map = {'open': 'exit / reset', 'fist': 'paint / erase',
+                        'thumbdown': 'clear  0.5s',  'victory': 'photo  0.2s'}
+            p.setFont(QFont("Courier", 6))
+            p.setPen(col_sub)
+            p.drawText(QRectF(hi * seg_w, by2 + btn_h2 * 0.58, seg_w, btn_h2 * 0.42),
+                       Qt.AlignCenter, hint_map.get(gk, ''))
 
     # ── 리뷰 화면 ─────────────────────────────────
     def _draw_review(self, p: QPainter, w: int, h: int):
@@ -694,16 +864,38 @@ class CameraView(QWidget):
             p.setPen(C_PURPLE)
             p.drawText(badge, Qt.AlignCenter, "▶  REPLAY")
         else:
-            # 영상 대기 표시
+            # 영상 로딩 중: 회전 스피너
             vid_x = half_w + gap
             vid_w_avail = w - vid_x - 18
             placeholder = QRectF(vid_x, avail_y, vid_w_avail, avail_h)
             _draw_glass(p, placeholder, radius=3,
                         bg=QColor(12, 14, 24, 180),
                         border=QColor(120, 60, 255, 60))
-            p.setFont(QFont("Courier", 10))
-            p.setPen(QColor(120, 60, 255, 120))
-            p.drawText(placeholder, Qt.AlignCenter, "NO VIDEO")
+
+            cx_s = int(placeholder.x() + placeholder.width() / 2)
+            cy_s = int(placeholder.y() + placeholder.height() / 2)
+            R_s  = 44
+            angle = (time.time() * 360) % 360  # 초당 1바퀴
+
+            # 트랙 링
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(120, 60, 255, 40), 6, Qt.SolidLine, Qt.RoundCap))
+            p.drawEllipse(QPointF(cx_s, cy_s), R_s, R_s)
+
+            # 회전 호 (270도)
+            p.setPen(QPen(C_PURPLE, 6, Qt.SolidLine, Qt.RoundCap))
+            arc_r = QRect(cx_s - R_s, cy_s - R_s, R_s * 2, R_s * 2)
+            p.drawArc(arc_r, int((90 - angle) * 16), -270 * 16)
+
+            # 외곽 글로우
+            p.setPen(QPen(QColor(120, 60, 255, 30), 2))
+            p.drawEllipse(QPointF(cx_s, cy_s), R_s + 10, R_s + 10)
+
+            # 중앙 텍스트
+            p.setFont(QFont("Courier", 9, QFont.Bold))
+            p.setPen(QColor(120, 60, 255, 180))
+            p.drawText(QRectF(cx_s - 60, cy_s + R_s + 12, 120, 20),
+                       Qt.AlignCenter, "LOADING...")
 
         # 수직 구분선 (콜라주 / 영상 사이)
         sep_x = half_w + gap // 2
@@ -761,17 +953,29 @@ class PhotoboothWindow(QMainWindow):
         self.color_idx        = 4  # 기본: 시안
         self.draw_color_cv    = PEN_COLORS_CV[4]
         self.draw_color_qc    = PEN_COLORS_QC[4]
-        self.line_thickness   = 5
-        self.last_gesture     = None
-        self.gesture_start    = None
-        self.countdown_start  = None
-        self.flash_start      = None
+        self._palette_touched = False  # 팔레트 터치 디바운스
+        self.line_thickness        = 5
+        self.draw_mode             = DRAW_DEFAULT
+        self.canvas_dirty          = False   # 캔버스에 픽셀이 있으면 True
+        self.last_gesture          = None
+        self.gesture_start         = None
+        # ── 홀드 타이머
+        self.fist_hold_start       = None
+        self.fist_toggled          = False
+        self.thumbdown_hold_start  = None
+        self.thumbdown_fired       = False
+        self.victory_hold_start    = None
+        self.victory_fired         = False
+        self.countdown_start       = None
+        self.flash_start           = None
         self.frame_index      = 0
         self.fps              = 30
         self._review_cap      = None
         self._session_dir     = None
         self._vid_tmp         = os.path.join(SAVE_DIR, '_recording_tmp_v3.avi')
         self._out_writer      = None
+        self._write_queue     = queue.Queue(maxsize=8)
+        self._writer_thread   = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -792,11 +996,11 @@ class PhotoboothWindow(QMainWindow):
         print("=" * 50)
         print("  4-CUT PHOTOBOOTH  v3  (Modern Dark)")
         print("=" * 50)
-        print("  peace        : 촬영 (즉시)")
-        print("  hand         : 그리기")
-        print("  fist         : 펜 색상 변경")
-        print("  open         : 그림 지우기 / 리셋")
-        print("  ESC / Q      : 종료")
+        print("  🖐 Open_Palm   : Default 복귀 / 리뷰 리셋")
+        print("  ✊ Fist (0.2s) : Default/Erase→Painting / Painting→Erase")
+        print("  👎 Thumb_Down  : 캔버스 전체 지우기 (0.5s, Default 상태에서)")
+        print("  ✌ Victory     : 촬영 (0.2s, Default 상태에서)")
+        print("  ESC / Q       : 종료")
         print("=" * 50)
 
     def _on_frame(self):
@@ -812,15 +1016,52 @@ class PhotoboothWindow(QMainWindow):
         h, w  = frame.shape[:2]
         now   = time.time()
 
+        # REVIEW 중에는 카메라 스트림을 수신만 하고 제스처/녹화 스킵
+        if self.state == STATE_REVIEW:
+            self.frame_index += 1
+            img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
+            ts_ms    = int(self.frame_index * 1000 / self.fps)
+            result   = self.recognizer.recognize_for_video(mp_image, ts_ms)
+
+            raw_g = (result.gestures[0][0].category_name
+                     if result.gestures else '')
+            cur_g = _GESTURE_MAP.get(raw_g, None)
+
+            # Open_Palm: 이전 프레임이 open이 아닐 때만 트리거 (엣지 감지)
+            if cur_g == 'open' and self.last_gesture != 'open':
+                self.last_gesture = 'open'
+                self._reset_session(h, w)
+                self.cam_view.state = STATE_WAITING
+                self.strip.setVisible(True)
+                self.cam_view.frame_pix = _cv_to_pixmap(frame)
+                self.cam_view.update()
+                return
+
+            self.last_gesture = cur_g
+
+            if self._review_cap:
+                ret_v, vframe = self._review_cap.read()
+                if not ret_v:
+                    self._review_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_v, vframe = self._review_cap.read()
+                if ret_v and vframe is not None:
+                    self.cam_view.review_video_pix = _cv_to_pixmap(vframe)
+            self.cam_view.update()
+            return
+
         if self.draw_canvas is None:
             self.draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
 
         gesture = None
+        hold_progress = 0.0
+        hold_label    = ''
+
         if self.state not in (STATE_REVIEW,):
             img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            ts_ms    = int(self.frame_index * 1000 / self.fps)
             self.frame_index += 1
+            ts_ms    = int(self.frame_index * 1000 / self.fps)
             result = self.recognizer.recognize_for_video(mp_image, ts_ms)
 
             if result.hand_landmarks:
@@ -830,28 +1071,93 @@ class PhotoboothWindow(QMainWindow):
                     ix = int(hand_landmarks[8].x * w)
                     iy = int(hand_landmarks[8].y * h)
 
-                    if gesture == 'fist':
+                    # ── Open_Palm: 즉시 DEFAULT 복귀 ──────────────
+                    if gesture == 'open':
+                        self.draw_mode = DRAW_DEFAULT
+                        self.prev_x = self.prev_y = None
+                        if self.state in (STATE_COUNTDOWN, STATE_FLASH):
+                            self.state = STATE_WAITING
+
+                    # ── Fist: 0.2s 홀드 → PAINT/ERASE 토글 ────────
+                    elif gesture == 'fist':
                         if self.last_gesture != 'fist':
-                            self.color_idx     = (self.color_idx + 1) % len(PEN_COLORS_CV)
-                            self.draw_color_cv = PEN_COLORS_CV[self.color_idx]
-                            self.draw_color_qc = PEN_COLORS_QC[self.color_idx]
+                            self.fist_hold_start = now
+                            self.fist_toggled    = False
+                        if self.fist_hold_start is not None:
+                            held = now - self.fist_hold_start
+                            hold_progress = min(held / HOLD_FIST, 1.0)
+                            hold_label    = '✊  FIST  —  TOGGLE  PAINT / ERASE'
+                            if held >= HOLD_FIST and not self.fist_toggled:
+                                if self.draw_mode in (DRAW_DEFAULT, DRAW_ERASE):
+                                    self.draw_mode = DRAW_PAINTING
+                                else:
+                                    self.draw_mode = DRAW_ERASE
+                                self.fist_toggled = True
                         self.prev_x = self.prev_y = None
-                    elif gesture == 'open':
-                        self.draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+
+                    # ── Thumb_Down: 0.5s 홀드 → 전체 지우기 (DEFAULT) ─
+                    elif gesture == 'thumbdown':
+                        if self.last_gesture != 'thumbdown':
+                            self.thumbdown_hold_start = now
+                            self.thumbdown_fired      = False
+                        if self.thumbdown_hold_start is not None:
+                            held = now - self.thumbdown_hold_start
+                            hold_progress = min(held / HOLD_CLEAR, 1.0)
+                            hold_label    = '👎  THUMB DOWN  —  CLEAR  CANVAS'
+                            if (held >= HOLD_CLEAR and not self.thumbdown_fired):
+                                self.draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                                self.canvas_dirty = False
+                                self.thumbdown_fired = True
                         self.prev_x = self.prev_y = None
-                    elif gesture == 'peace':
+
+                    # ── Victory: 0.2s 홀드 → 촬영 (DEFAULT) ──────────
+                    elif gesture == 'victory':
+                        if self.last_gesture != 'victory' or self.victory_hold_start is None:
+                            self.victory_hold_start = now
+                            self.victory_fired      = False
+                        if self.victory_hold_start is not None:
+                            held = now - self.victory_hold_start
+                            hold_progress = 1.0 if HOLD_PHOTO == 0 else min(held / HOLD_PHOTO, 1.0)
+                            hold_label    = '✌  VICTORY  —  CAPTURE'
+                            if (held >= HOLD_PHOTO and not self.victory_fired
+                                    and self.state == STATE_WAITING):
+                                self.state           = STATE_COUNTDOWN
+                                self.countdown_start = now
+                                self.victory_fired   = True
                         self.prev_x = self.prev_y = None
+
+                    # ── 그리기 / 지우기 ────────────────────────────
                     else:
-                        if self.state != STATE_COUNTDOWN:
-                            if self.prev_x is not None and self.prev_y is not None:
-                                cv2.line(self.draw_canvas,
-                                         (self.prev_x, self.prev_y), (ix, iy),
-                                         self.draw_color_cv, self.line_thickness)
-                            self.prev_x, self.prev_y = ix, iy
+                        if self.state == STATE_WAITING:
+                            if self.draw_mode == DRAW_PAINTING:
+                                if self.prev_x is not None and self.prev_y is not None:
+                                    cv2.line(self.draw_canvas,
+                                             (self.prev_x, self.prev_y), (ix, iy),
+                                             self.draw_color_cv, self.line_thickness)
+                                    self.canvas_dirty = True
+                                self.prev_x, self.prev_y = ix, iy
+                            elif self.draw_mode == DRAW_ERASE:
+                                cv2.circle(self.draw_canvas, (ix, iy),
+                                           self.line_thickness * 4, (0, 0, 0), -1)
+                                self.canvas_dirty = True
+                                self.prev_x = self.prev_y = None
+                            else:  # DEFAULT
+                                # 마우스 커서로 팔레트 터치 → 색 변경
+                                hit_idx = _pencil_hit_palette(ix, iy, h)
+                                if hit_idx >= 0:
+                                    if not self._palette_touched:
+                                        self.color_idx     = hit_idx
+                                        self.draw_color_cv = PEN_COLORS_CV[hit_idx]
+                                        self.draw_color_qc = PEN_COLORS_QC[hit_idx]
+                                        self._palette_touched = True
+                                else:
+                                    self._palette_touched = False
+                                self.prev_x = self.prev_y = None
                         else:
+                            self._palette_touched = False
                             self.prev_x = self.prev_y = None
 
-                    # 랜드마크 (시안/그린 계열)
+                    # ── 랜드마크
                     for conn in HAND_CONNECTIONS:
                         s = hand_landmarks[conn[0]]; e = hand_landmarks[conn[1]]
                         cv2.line(frame, (int(s.x*w), int(s.y*h)),
@@ -859,29 +1165,26 @@ class PhotoboothWindow(QMainWindow):
                     for lm in hand_landmarks:
                         cv2.circle(frame, (int(lm.x*w), int(lm.y*h)), 3, (0, 220, 255), -1)
 
-                    # 커서
-                    if gesture in ('fist', 'open', 'peace'):
-                        cv2.circle(frame, (ix, iy), 14, (0, 220, 255), 1)
-                        cv2.circle(frame, (ix, iy),  4, (0, 220, 255), -1)
-                    else:
-                        cv2.circle(frame, (ix, iy), self.line_thickness + 6,
-                                   self.draw_color_cv, 2)
-                        cv2.circle(frame, (ix, iy), 3, self.draw_color_cv, -1)
+                    # ── 커서
+                    if self.draw_mode == DRAW_PAINTING:
+                        _draw_pencil_icon(frame, ix, iy, self.draw_color_cv)
+                    elif self.draw_mode == DRAW_ERASE:
+                        _draw_eraser_icon(frame, ix, iy)
+                    else:  # DEFAULT – 마우스 포인터
+                        _draw_mouse_cursor_icon(frame, ix, iy)
             else:
                 self.prev_x = self.prev_y = None
 
-        if gesture == 'peace':
-            if self.last_gesture != 'peace':
-                if self.state == STATE_WAITING:
-                    self.state = STATE_COUNTDOWN
-                    self.countdown_start = now
-            self.gesture_start = now
-        else:
-            self.gesture_start = None
-
-        if gesture == 'open' and self.state == STATE_REVIEW:
-            if self.last_gesture != 'open':
-                self._reset_session(h, w)
+        # ── 홀드 타이머 리셋 (제스처 변경 시)
+        if gesture != 'fist':
+            self.fist_hold_start = None
+            self.fist_toggled    = False
+        if gesture != 'thumbdown':
+            self.thumbdown_hold_start = None
+            self.thumbdown_fired      = False
+        if gesture != 'victory':
+            self.victory_hold_start = None
+            self.victory_fired      = False
 
         self.last_gesture = gesture
 
@@ -895,66 +1198,98 @@ class PhotoboothWindow(QMainWindow):
                 canvas_fg = cv2.bitwise_and(self.draw_canvas, self.draw_canvas, mask=mask)
                 shot = cv2.add(frame_bg, canvas_fg)
                 self.photos.append(shot.copy())
-                self.photo_masks.append(
-                    _make_inpaint_mask(self.draw_canvas, self.line_thickness))
+                _canvas_snap = self.draw_canvas.copy()
+                _thickness   = self.line_thickness
+                def _make_mask_bg(canvas=_canvas_snap, thick=_thickness):
+                    self.photo_masks.append(_make_inpaint_mask(canvas, thick))
+                threading.Thread(target=_make_mask_bg, daemon=True).start()
                 self.draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+                self.canvas_dirty = False
                 self.state = STATE_FLASH
                 self.flash_start = now
                 print(f"[{len(self.photos)}/{TOTAL_SHOTS}] 촬영!")
                 if len(self.photos) >= TOTAL_SHOTS:
                     self._session_dir = os.path.join(
                         SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
-                    _save_final(self.photos, masks=self.photo_masks,
-                                session_dir=self._session_dir)
+                    _photos_snap = list(self.photos)
+                    _masks_snap  = list(self.photo_masks)
+                    _sdir        = self._session_dir
+                    threading.Thread(
+                        target=_save_final,
+                        args=(_photos_snap,),
+                        kwargs={'masks': _masks_snap, 'session_dir': _sdir},
+                        daemon=True
+                    ).start()
 
         elif self.state == STATE_FLASH:
             if now - self.flash_start >= FLASH_SEC:
                 if len(self.photos) >= TOTAL_SHOTS:
-                    collage = _make_final_collage(self.photos)
-                    self.cam_view.review_pix = _cv_to_pixmap(collage) if collage is not None else None
-                    self.state = STATE_REVIEW
+                    self.state        = STATE_REVIEW
+                    self.last_gesture = None   # 리뷰 진입 시 제스처 초기화
                     _vid_play = os.path.join(SAVE_DIR, '_recording_play_v3.avi')
                     if self._out_writer and self._out_writer is not False:
+                        self._write_queue.put(None)   # 백그라운드 writer 종료
                         self._out_writer.release()
                         self._out_writer = None
-                    if os.path.exists(self._vid_tmp):
+                        self._writer_thread = None
+                    _photos_snap = list(self.photos)
+                    _vid_src     = self._vid_tmp
+                    _vid_dst     = _vid_play
+                    def _prepare_review(photos=_photos_snap, src=_vid_src, dst=_vid_dst):
                         import shutil as _sh
-                        _sh.copy2(self._vid_tmp, _vid_play)
-                        self._review_cap = cv2.VideoCapture(_vid_play)
+                        collage = _make_final_collage(photos)
+                        if collage is not None:
+                            self.cam_view.review_pix = _cv_to_pixmap(collage)
+                        if os.path.exists(src):
+                            _sh.copy2(src, dst)
+                            self._review_cap = cv2.VideoCapture(dst)
+                    threading.Thread(target=_prepare_review, daemon=True).start()
                 else:
                     self.state = STATE_WAITING
+                    # victory를 계속 들고 있어도 다음 컷을 찍을 수 있도록 리셋
+                    self.victory_fired      = False
+                    self.victory_hold_start = None
 
-        # ── 그리기 합성
+        # ── 그리기 합성 (캔버스에 내용이 있을 때만)
         if self.state not in (STATE_REVIEW,):
-            mask = cv2.cvtColor(self.draw_canvas, cv2.COLOR_BGR2GRAY)
-            _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
-            mask_inv  = cv2.bitwise_not(mask)
-            frame_bg  = cv2.bitwise_and(frame, frame, mask=mask_inv)
-            canvas_fg = cv2.bitwise_and(self.draw_canvas, self.draw_canvas, mask=mask)
-            frame     = cv2.add(frame_bg, canvas_fg)
+            if self.canvas_dirty:
+                mask = cv2.cvtColor(self.draw_canvas, cv2.COLOR_BGR2GRAY)
+                _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
+                mask_inv  = cv2.bitwise_not(mask)
+                frame_bg  = cv2.bitwise_and(frame, frame, mask=mask_inv)
+                canvas_fg = cv2.bitwise_and(self.draw_canvas, self.draw_canvas, mask=mask)
+                frame     = cv2.add(frame_bg, canvas_fg)
 
-        # ── 녹화
+# ── 녹화 (백그라운드 스레드로 인코딩)
         if self._out_writer is None and self.state not in (STATE_REVIEW,):
             _vh, _vw = frame.shape[:2]
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             writer = cv2.VideoWriter(self._vid_tmp, fourcc, self.fps, (_vw, _vh))
             if writer.isOpened():
                 self._out_writer = writer
+                # 백그라운드 인코딩 스레드 시작
+                def _writer_worker(w=writer, q=self._write_queue):
+                    while True:
+                        item = q.get()
+                        if item is None:
+                            break
+                        w.write(item)
+                self._writer_thread = threading.Thread(
+                    target=_writer_worker, daemon=True)
+                self._writer_thread.start()
                 print(f"[녹화 시작] {self._vid_tmp}")
             else:
                 writer.release()
                 self._out_writer = False
         if self._out_writer and self._out_writer is not False and self.state not in (STATE_REVIEW,):
-            self._out_writer.write(frame)
+            try:
+                self._write_queue.put_nowait(frame.copy())
+            except queue.Full:
+                pass  # 큐 가득 차면 프레임 드롭 (UI 블로킹 방지)
 
-        # ── 리뷰 영상 업데이트
-        if self.state == STATE_REVIEW and self._review_cap:
-            ret_v, vframe = self._review_cap.read()
-            if not ret_v:
-                self._review_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret_v, vframe = self._review_cap.read()
-            if ret_v and vframe is not None:
-                self.cam_view.review_video_pix = _cv_to_pixmap(vframe)
+        # ── 팔레트 UI 렌더링 (WAITING + PAINT/DEFAULT 상태에서만)
+        if self.state == STATE_WAITING:
+            _draw_color_palette_on_frame(frame, self.color_idx)
 
         # ── 위젯 업데이트
         self.cam_view.frame_pix       = _cv_to_pixmap(frame)
@@ -965,7 +1300,11 @@ class PhotoboothWindow(QMainWindow):
         self.cam_view.gesture         = gesture
         self.cam_view.gesture_start   = self.gesture_start
         self.cam_view.drawing_color   = self.draw_color_qc
+        self.cam_view.draw_mode       = self.draw_mode
+        self.cam_view.hold_progress   = hold_progress
+        self.cam_view.hold_label      = hold_label
 
+        self.strip.setVisible(self.state != STATE_REVIEW)
         self.strip.setPhotos(self.photos)
         self.cam_view.update()
 
@@ -973,6 +1312,7 @@ class PhotoboothWindow(QMainWindow):
         self.photos = []
         self.photo_masks = []
         self.draw_canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        self.canvas_dirty = False
         self.cam_view.review_pix = None
         self.cam_view.review_video_pix = None
         self.state = STATE_WAITING
@@ -985,8 +1325,14 @@ class PhotoboothWindow(QMainWindow):
                 try: os.remove(p)
                 except Exception: pass
         if self._out_writer and self._out_writer is not False:
+            self._write_queue.put(None)
             self._out_writer.release()
-        self._out_writer = None
+        self._out_writer    = None
+        self._writer_thread = None
+        self._write_queue   = queue.Queue(maxsize=8)  # 큐 초기화
+        self.draw_mode      = DRAW_DEFAULT
+        self.canvas_dirty   = False
+        self.strip.setPhotos([])   # photos + 캐시 동시 초기화
         self._session_dir = None
         print("세션 리셋")
 
@@ -999,6 +1345,10 @@ class PhotoboothWindow(QMainWindow):
         self.timer.stop()
         if self._review_cap:
             self._review_cap.release()
+        # 백그라운드 writer 스레드 종료
+        if self._writer_thread and self._writer_thread.is_alive():
+            self._write_queue.put(None)
+            self._writer_thread.join(timeout=2)
         if self._out_writer and self._out_writer is not False:
             self._out_writer.release()
         if self.video:

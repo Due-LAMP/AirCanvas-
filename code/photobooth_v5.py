@@ -34,7 +34,7 @@ BG_IMAGE_PATH = os.path.join(_BASE_DIR, 'background/background.png')
 
 # ─── 카메라 영역 ───────────────────────────────────────────────
 CAM_X, CAM_Y = 20,  20
-CAM_W, CAM_H = 840, 680
+CAM_W, CAM_H = 840, 580
 
 # ─── 네컷 사진 슬롯 (배경 PNG 틀 좌표에 맞게 조정) ────────────
 PHOTO_W, PHOTO_H = 360, 155
@@ -188,11 +188,11 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
             draw_canvas = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
 
         if _bg_resized is None:
+            total_w = max(CAM_X + CAM_W, max(sx + PHOTO_W for sx, sy in PHOTO_SLOTS)) + 20
+            total_h = max(CAM_Y + CAM_H, max(sy + PHOTO_H for sx, sy in PHOTO_SLOTS)) + 20
             if _bg_raw is not None:
-                _bg_resized = _bg_raw.copy()
+                _bg_resized = cv2.resize(_bg_raw, (total_w, total_h))
             else:
-                total_w = max(CAM_X + CAM_W, max(sx + PHOTO_W for sx, sy in PHOTO_SLOTS)) + 20
-                total_h = max(CAM_Y + CAM_H, max(sy + PHOTO_H for sx, sy in PHOTO_SLOTS)) + 20
                 _bg_resized = np.full((total_h, total_w, 3), BG_COLOR, dtype=np.uint8)
 
         # ── 손 인식

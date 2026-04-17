@@ -1,6 +1,15 @@
+# 가상환경
+.venv/
 venv/
+
+# Python
 __pycache__/
+
+# 인증 정보
 code/credentials.json
 code/token.json
 code/gmail_api/credentials.json
 code/gmail_api/token.json
+
+# 기타
+code/not_to_be_committed

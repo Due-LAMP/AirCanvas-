@@ -4,6 +4,7 @@ import os
 import numpy as np
 import time
 import signal
+import shutil
 from datetime import datetime
 
 # ══════════════════════════════════════════════════════════════════
@@ -19,38 +20,46 @@ signal.signal(signal.SIGINT, _sigint_handler)
 
 
 # ══════════════════════════════════════════════════════════════════
-#  상수 / 레이아웃  (1280 x 720 기준)
+#  상수 / 레이아웃
 # ══════════════════════════════════════════════════════════════════
 TOTAL_SHOTS   = 4
 COUNTDOWN_SEC = 3
 FLASH_SEC     = 0.5
-GESTURE_HOLD  = 0.8
 FPS           = 30
 
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ─── 배경 PNG ──────────────────────────────────────────────────
-BG_IMAGE_PATH = os.path.join(_BASE_DIR, 'background/background.png')
+# ─── 배경 / 네컷 프레임 PNG ────────────────────────────────────
+BG_IMAGE_PATH    = os.path.join(_BASE_DIR, 'image/background.png')
+FRAME_IMAGE_PATH = os.path.join(_BASE_DIR, 'image/4cut_frame2.png')
 
 # ─── 카메라 영역 ───────────────────────────────────────────────
-CAM_X, CAM_Y = 20,  20
-CAM_W, CAM_H = 840, 580
+CAM_X  = 80
+CAM_W, CAM_H = 560, 420
+CAM_Y  = (600 - CAM_H) // 2   # 세로 중앙
 
-# ─── 네컷 사진 슬롯 (배경 PNG 틀 좌표에 맞게 조정) ────────────
-PHOTO_W, PHOTO_H = 360, 155
+# ─── 정보 패널 (카메라 상단) ───────────────────────────────────
+INFO_X = CAM_X
+INFO_Y = CAM_Y - 28
+INFO_W = CAM_W
+
+# ─── 네컷 프레임 캔버스 배치 위치 ─────────────────────────────
+FRAME_X, FRAME_Y = 720, 10
+
+# ─── 사진 슬롯 (4cut_frame.png 내부 상대 좌표) ────────────────
+PHOTO_W, PHOTO_H = 155, 116
 
 PHOTO_SLOTS = [
-    (880,  20),   # 1번 사진 (x, y)
-    (880, 195),   # 2번 사진
-    (880, 370),   # 3번 사진
-    (880, 545),   # 4번 사진
+    (16,  13),   # 1번 사진
+    (16, 135),   # 2번 사진
+    (16, 257),   # 3번 사진
+    (16, 380),   # 4번 사진
 ]
 
 # ─── 컬러 ──────────────────────────────────────────────────────
 WHITE    = (255, 255, 255)
 BLACK    = (0,   0,   0)
 GRAY     = (180, 180, 180)
-ACCENT   = (100,  50, 255)
 BG_COLOR = (245, 235, 255)
 
 PEN_COLORS = [
@@ -64,7 +73,9 @@ PEN_COLORS = [
 ]
 
 # ─── 저장 경로 ─────────────────────────────────────────────────
-SAVE_DIR = os.path.join(_BASE_DIR, 'photobooth_output')
+SAVE_DIR  = os.path.join(_BASE_DIR, 'photobooth_output')
+_VID_TMP  = os.path.join(SAVE_DIR, '_rec_tmp.avi')
+_VID_PLAY = os.path.join(SAVE_DIR, '_rec_play.avi')
 os.makedirs(SAVE_DIR, exist_ok=True)
 
 
@@ -112,22 +123,113 @@ if video is None:
 
 
 # ══════════════════════════════════════════════════════════════════
-#  배경 이미지 로드
+#  배경 / 프레임 이미지 로드
 # ══════════════════════════════════════════════════════════════════
-_bg_raw     = cv2.imread(BG_IMAGE_PATH)
+_bg_raw    = cv2.imread(BG_IMAGE_PATH)
+_frame_raw = cv2.imread(FRAME_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
+
 if _bg_raw is None:
     print(f"[경고] 배경 이미지 없음: {BG_IMAGE_PATH} → 단색 배경 사용")
+if _frame_raw is None:
+    print(f"[경고] 프레임 이미지 없음: {FRAME_IMAGE_PATH}")
+elif _frame_raw.shape[2] == 3:
+    # 알파채널 없으면 흰색을 투명으로 변환
+    bgra = cv2.cvtColor(_frame_raw, cv2.COLOR_BGR2BGRA)
+    white_mask = np.all(_frame_raw >= 240, axis=2)
+    bgra[white_mask, 3] = 0
+    _frame_raw = bgra
+    print("[프레임] 알파채널 없음 → 흰색 투명 처리")
+
 _bg_resized = None
 
 
 # ══════════════════════════════════════════════════════════════════
-#  사진 저장
+#  프레임 + 사진 캔버스에 그리기
+# ══════════════════════════════════════════════════════════════════
+def _render_frame(canvas, photos):
+    if _frame_raw is None:
+        return
+
+    fh, fw = _frame_raw.shape[:2]
+    avail_w = canvas.shape[1] - FRAME_X
+    avail_h = canvas.shape[0] - FRAME_Y
+    scale = min(avail_w / fw, avail_h / fh)
+    nw, nh = int(fw * scale), int(fh * scale)
+    frame_disp = cv2.resize(_frame_raw, (nw, nh))
+
+    # 사진 먼저
+    for i, (sx, sy) in enumerate(PHOTO_SLOTS):
+        if i < len(photos):
+            ph_s, pw_s = photos[i].shape[:2]
+            ps = min(PHOTO_W / pw_s, PHOTO_H / ph_s)
+            pw, ph = int(pw_s * ps), int(ph_s * ps)
+            resized = cv2.resize(photos[i], (pw, ph))
+            ax = FRAME_X + int(sx * scale) + (int(PHOTO_W * scale) - pw) // 2
+            ay = FRAME_Y + int(sy * scale) + (int(PHOTO_H * scale) - ph) // 2
+            ay2, ax2 = min(ay+ph, canvas.shape[0]), min(ax+pw, canvas.shape[1])
+            canvas[ay:ay2, ax:ax2] = resized[:ay2-ay, :ax2-ax]
+
+    # 프레임을 사진 위에 덮어서 장식이 보이게
+    roi = canvas[FRAME_Y:FRAME_Y+nh, FRAME_X:FRAME_X+nw]
+    if frame_disp.shape[2] == 4:
+        alpha = frame_disp[:, :, 3:4] / 255.0
+        roi[:] = (frame_disp[:, :, :3] * alpha + roi * (1 - alpha)).astype(np.uint8)
+    else:
+        roi[:] = frame_disp
+
+
+# ══════════════════════════════════════════════════════════════════
+#  정보 패널
+# ══════════════════════════════════════════════════════════════════
+_GESTURE_LABEL = {'peace': 'PEACE', 'fist': 'FIST', 'open': 'OPEN'}
+
+def _draw_info_panel(canvas, gesture, result):
+    x, y, w = INFO_X, INFO_Y, INFO_W
+    cy = y + 14
+
+    # ── 제스처 상태
+    if result is not None and result.hand_landmarks:
+        g_text = _GESTURE_LABEL.get(gesture, 'DRAW')
+        tw = cv2.getTextSize(g_text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
+        cv2.putText(canvas, g_text, (x + w//2 - tw//2, cy + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 200, 255), 1, cv2.LINE_AA)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  콜라주 저장 (4cut_frame.png 기반)
 # ══════════════════════════════════════════════════════════════════
 def save_final(photos, session_dir):
     os.makedirs(session_dir, exist_ok=True)
     for i, photo in enumerate(photos):
         cv2.imwrite(os.path.join(session_dir, f"shot_{i+1}.jpg"), photo)
         print(f"  저장: shot_{i+1}.jpg")
+
+    if _frame_raw is not None:
+        fh, fw = _frame_raw.shape[:2]
+        collage = np.ones((fh, fw, 3), dtype=np.uint8) * 255  # 흰 배경
+
+        # 사진 먼저
+        for i, (sx, sy) in enumerate(PHOTO_SLOTS):
+            if i < len(photos):
+                ph_s, pw_s = photos[i].shape[:2]
+                s = min(PHOTO_W / pw_s, PHOTO_H / ph_s)
+                pw, ph = int(pw_s * s), int(ph_s * s)
+                resized = cv2.resize(photos[i], (pw, ph))
+                ox = sx + (PHOTO_W - pw) // 2
+                oy = sy + (PHOTO_H - ph) // 2
+                oy2 = min(oy+ph, fh)
+                ox2 = min(ox+pw, fw)
+                collage[oy:oy2, ox:ox2] = resized[:oy2-oy, :ox2-ox]
+
+        # 프레임을 사진 위에 덮기
+        if _frame_raw.shape[2] == 4:
+            alpha = _frame_raw[:, :, 3:4] / 255.0
+            collage = (_frame_raw[:, :, :3] * alpha + collage * (1 - alpha)).astype(np.uint8)
+        else:
+            collage = _frame_raw.copy()
+
+        cv2.imwrite(os.path.join(session_dir, "4cut.jpg"), collage)
+
     print(f"✓ 저장 완료 → {session_dir}")
 
 
@@ -146,7 +248,7 @@ STATE_REVIEW    = 'review'
 print("=" * 50)
 print("  인생네컷 포토부스")
 print("=" * 50)
-print("  peace (0.8s) : 촬영")
+print("  peace        : 촬영")
 print("  손 (기본)    : 그리기")
 print("  fist         : 펜 색상 변경")
 print("  open         : 캔버스 지우기 / 리뷰 시 초기화")
@@ -156,20 +258,20 @@ print("=" * 50)
 cv2.namedWindow('PhotoBooth', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('PhotoBooth', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-# 상태 변수
 state           = STATE_WAITING
 photos          = []
 countdown_start = None
 flash_start     = None
 last_gesture    = None
-gesture_start   = None
 
-# 그리기
 draw_canvas    = None
 prev_x, prev_y = None, None
 color_idx      = 0
 drawing_color  = PEN_COLORS[color_idx]
 line_thickness = 5
+
+out_writer  = None
+review_cap  = None
 
 with GestureRecognizer.create_from_options(_mp_options) as recognizer:
     frame_index = 0
@@ -188,12 +290,23 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
             draw_canvas = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
 
         if _bg_resized is None:
-            total_w = max(CAM_X + CAM_W, max(sx + PHOTO_W for sx, sy in PHOTO_SLOTS)) + 20
-            total_h = max(CAM_Y + CAM_H, max(sy + PHOTO_H for sx, sy in PHOTO_SLOTS)) + 20
             if _bg_raw is not None:
-                _bg_resized = cv2.resize(_bg_raw, (total_w, total_h))
+                _bg_resized = _bg_raw.copy()
             else:
+                total_w = FRAME_X + (_frame_raw.shape[1] if _frame_raw is not None else 280) + 20
+                total_h = max(CAM_Y + CAM_H, FRAME_Y + (_frame_raw.shape[0] if _frame_raw is not None else 580)) + 20
                 _bg_resized = np.full((total_h, total_w, 3), BG_COLOR, dtype=np.uint8)
+
+        # ── 녹화 시작
+        if out_writer is None and state != STATE_REVIEW:
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            writer = cv2.VideoWriter(_VID_TMP, fourcc, FPS, (cam_w, cam_h))
+            if writer.isOpened():
+                out_writer = writer
+                print("[녹화 시작]")
+            else:
+                writer.release()
+                out_writer = False
 
         # ── 손 인식
         gesture = None
@@ -235,25 +348,22 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                     else:
                         prev_x, prev_y = None, None
 
-                # 커서
                 cv2.circle(frame, (ix, iy), line_thickness + 4, drawing_color, 2)
                 cv2.circle(frame, (ix, iy), 3, drawing_color, -1)
 
-        # ── peace 유지 → 촬영 트리거
-        if gesture == 'peace':
-            if last_gesture != 'peace':
-                gesture_start = now
-            elif now - gesture_start >= GESTURE_HOLD and state == STATE_WAITING:
-                state           = STATE_COUNTDOWN
-                countdown_start = now
-                gesture_start   = now
-        else:
-            gesture_start = None
+        # ── peace → 촬영
+        if gesture == 'peace' and last_gesture != 'peace' and state == STATE_WAITING:
+            state           = STATE_COUNTDOWN
+            countdown_start = now
 
         # ── open → 초기화
         if gesture == 'open' and last_gesture != 'open':
             if state == STATE_REVIEW:
-                photos      = []
+                photos     = []
+                if review_cap:
+                    review_cap.release()
+                    review_cap = None
+                out_writer  = None
                 draw_canvas = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
                 state       = STATE_WAITING
                 print("초기화 완료")
@@ -281,72 +391,80 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:
-                state = STATE_REVIEW if len(photos) >= TOTAL_SHOTS else STATE_WAITING
+                if len(photos) >= TOTAL_SHOTS:
+                    if out_writer and out_writer is not False:
+                        out_writer.release()
+                        out_writer = None
+                    if os.path.exists(_VID_TMP):
+                        shutil.copy2(_VID_TMP, _VID_PLAY)
+                        review_cap = cv2.VideoCapture(_VID_PLAY)
+                    state = STATE_REVIEW
+                else:
+                    state = STATE_WAITING
 
-        # ── 그리기 캔버스 합성
-        gray_m  = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
-        _, msk  = cv2.threshold(gray_m, 1, 255, cv2.THRESH_BINARY)
-        msk_inv = cv2.bitwise_not(msk)
-        frame   = cv2.add(cv2.bitwise_and(frame, frame, mask=msk_inv),
-                          cv2.bitwise_and(draw_canvas, draw_canvas, mask=msk))
+        # ── 녹화
+        if out_writer and out_writer is not False and state != STATE_REVIEW:
+            out_writer.write(frame)
+
+        # ── 그리기 합성
+        if state != STATE_REVIEW:
+            gray_m  = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
+            _, msk  = cv2.threshold(gray_m, 1, 255, cv2.THRESH_BINARY)
+            msk_inv = cv2.bitwise_not(msk)
+            frame   = cv2.add(cv2.bitwise_and(frame, frame, mask=msk_inv),
+                              cv2.bitwise_and(draw_canvas, draw_canvas, mask=msk))
 
         # ══════════════════════════════════════════════════════════
-        #  캔버스 합성: 배경 + 카메라 + 사진
+        #  캔버스 합성
         # ══════════════════════════════════════════════════════════
-        canvas = _bg_resized.copy()
+        canvas  = _bg_resized.copy()
         total_w = canvas.shape[1]
         total_h = canvas.shape[0]
 
-        # 카메라 영상
-        canvas[CAM_Y:CAM_Y+CAM_H, CAM_X:CAM_X+CAM_W] = cv2.resize(frame, (CAM_W, CAM_H))
+        # 네컷 프레임 + 사진 슬롯 (항상 표시)
+        _render_frame(canvas, photos)
 
-        # 촬영된 사진 순서대로 슬롯에 붙이기
-        for i, (sx, sy) in enumerate(PHOTO_SLOTS):
-            if i < len(photos):
-                canvas[sy:sy+PHOTO_H, sx:sx+PHOTO_W] = cv2.resize(photos[i], (PHOTO_W, PHOTO_H))
+        if state == STATE_REVIEW:
+            # 카메라 자리에 영상 재생
+            if review_cap:
+                ret_v, vframe = review_cap.read()
+                if not ret_v:
+                    review_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_v, vframe = review_cap.read()
+                if ret_v and vframe is not None:
+                    canvas[CAM_Y:CAM_Y+CAM_H, CAM_X:CAM_X+CAM_W] = cv2.resize(vframe, (CAM_W, CAM_H))
+                    cv2.rectangle(canvas, (CAM_X+5, CAM_Y+5), (CAM_X+80, CAM_Y+22), (20, 10, 40), -1)
+                    cv2.putText(canvas, "REPLAY", (CAM_X+8, CAM_Y+18),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 170, 255), 1, cv2.LINE_AA)
 
-        # ── 카운트다운
-        if state == STATE_COUNTDOWN:
-            num_show = max(1, COUNTDOWN_SEC - int(now - countdown_start))
-            cx = CAM_X + CAM_W // 2
-            cy = CAM_Y + CAM_H // 2
-            ov = canvas.copy()
-            cv2.circle(ov, (cx, cy), 100, BLACK, -1)
-            cv2.addWeighted(ov, 0.5, canvas, 0.5, 0, canvas)
-            tw = cv2.getTextSize(str(num_show), cv2.FONT_HERSHEY_DUPLEX, 5.0, 10)[0][0]
-            cv2.putText(canvas, str(num_show), (cx - tw//2, cy + 35),
-                        cv2.FONT_HERSHEY_DUPLEX, 5.0, WHITE, 10, cv2.LINE_AA)
-
-        # ── 플래시
-        elif state == STATE_FLASH:
-            ratio = 1.0 - (now - flash_start) / FLASH_SEC
-            wh    = np.full_like(canvas, 255)
-            cv2.addWeighted(wh, ratio * 0.9, canvas, 1 - ratio * 0.9, 0, canvas)
-
-        # ── 리뷰 안내
-        elif state == STATE_REVIEW:
             hint = "Open palm : New Session  |  ESC : Quit"
-            hw   = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
-            cv2.putText(canvas, hint, (total_w//2 - hw//2, total_h - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, GRAY, 1, cv2.LINE_AA)
+            hw   = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
+            cv2.putText(canvas, hint, (CAM_X + CAM_W//2 - hw//2, CAM_Y + CAM_H - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, GRAY, 1, cv2.LINE_AA)
 
-        # ── 대기 안내
-        elif state == STATE_WAITING:
-            if gesture == 'peace' and gesture_start is not None:
-                ratio = min((now - gesture_start) / GESTURE_HOLD, 1.0)
-                bx1   = CAM_X + 10
-                bx2   = CAM_X + CAM_W - 10
-                by    = CAM_Y + CAM_H - 10
-                cv2.rectangle(canvas, (bx1, by-8), (bx2, by+8), (60, 60, 60), -1)
-                cv2.rectangle(canvas, (bx1, by-8),
-                              (bx1 + int((bx2-bx1)*ratio), by+8), ACCENT, -1)
-                cv2.rectangle(canvas, (bx1, by-8), (bx2, by+8), WHITE, 1)
-            else:
-                hint = "PEACE:shoot  HAND:draw  FIST:color  OPEN:clear"
-                hw   = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)[0][0]
-                cv2.putText(canvas, hint,
-                            (CAM_X + CAM_W//2 - hw//2, CAM_Y + CAM_H - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, GRAY, 1, cv2.LINE_AA)
+        else:
+            # 카메라 영상
+            canvas[CAM_Y:CAM_Y+CAM_H, CAM_X:CAM_X+CAM_W] = cv2.resize(frame, (CAM_W, CAM_H))
+
+            if state == STATE_COUNTDOWN:
+                num_show = max(1, COUNTDOWN_SEC - int(now - countdown_start))
+                cx = CAM_X + CAM_W // 2
+                cy = CAM_Y + CAM_H // 2
+                ov = canvas.copy()
+                cv2.circle(ov, (cx, cy), 100, BLACK, -1)
+                cv2.addWeighted(ov, 0.5, canvas, 0.5, 0, canvas)
+                tw = cv2.getTextSize(str(num_show), cv2.FONT_HERSHEY_DUPLEX, 5.0, 10)[0][0]
+                cv2.putText(canvas, str(num_show), (cx - tw//2, cy + 35),
+                            cv2.FONT_HERSHEY_DUPLEX, 5.0, WHITE, 10, cv2.LINE_AA)
+
+            elif state == STATE_FLASH:
+                ratio = 1.0 - (now - flash_start) / FLASH_SEC
+                wh    = np.full_like(canvas, 255)
+                cv2.addWeighted(wh, ratio * 0.9, canvas, 1 - ratio * 0.9, 0, canvas)
+
+        # ── 정보 패널
+        if state != STATE_REVIEW:
+            _draw_info_panel(canvas, gesture, result)
 
         cv2.imshow('PhotoBooth', canvas)
         key = cv2.waitKey(1) & 0xFF
@@ -357,6 +475,10 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
 # ══════════════════════════════════════════════════════════════════
 #  종료 정리
 # ══════════════════════════════════════════════════════════════════
+if out_writer and out_writer is not False:
+    out_writer.release()
+if review_cap:
+    review_cap.release()
 if video:
     video.release()
 cv2.destroyAllWindows()

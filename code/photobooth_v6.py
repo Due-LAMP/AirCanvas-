@@ -124,11 +124,22 @@ _GESTURE_MAP = {
 def _init_camera():
     for idx in range(20):
         cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret and frame is not None and frame.ndim == 3:
-                print(f"[카메라] /dev/video{idx} 연결됨")
-                return cap
+        if not cap.isOpened():
+            cap.release()
+            continue
+        # MJPG: C270은 640x480 이상에서 YUYV보다 훨씬 빠름
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 지연 최소화
+        ret, frame = cap.read()
+        if ret and frame is not None and frame.ndim == 3:
+            w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            print(f"[카메라] /dev/video{idx} 연결됨 ({w}x{h} @ {fps:.0f}fps MJPG)")
+            return cap
         cap.release()
     return None
 
@@ -389,8 +400,6 @@ out_writer  = None
 review_cap  = None
 
 with GestureRecognizer.create_from_options(_mp_options) as recognizer:
-    frame_index = 0
-
     while True:
         ret, frame = video.read()
         if not ret or _exit_requested:
@@ -428,8 +437,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
         if state != STATE_REVIEW:
             img_rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=img_rgb)
-            result   = recognizer.recognize_for_video(mp_image, int(frame_index * 1000 / FPS))
-        frame_index += 1
+            result   = recognizer.recognize_for_video(mp_image, int(time.time() * 1000))
 
         if result is None or not result.hand_landmarks:
             prev_x, prev_y  = None, None

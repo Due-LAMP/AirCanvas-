@@ -60,6 +60,7 @@ _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BG_IMAGE_PATH        = os.path.join(_BASE_DIR, 'image/background_line.png')
 BG_RESULT_IMAGE_PATH = os.path.join(_BASE_DIR, 'image/background.png')
 FRAME_IMAGE_PATH     = os.path.join(_BASE_DIR, 'image/4cut_frame.png')
+INTRO_IMAGE_PATH     = os.path.join(_BASE_DIR, 'image/page_1.png')
 
 # ─── 카메라 영역 ───────────────────────────────────────────────
 CAM_X  = 80
@@ -231,11 +232,14 @@ if video is None:
 _bg_raw        = cv2.imread(BG_IMAGE_PATH)
 _bg_result_raw = cv2.imread(BG_RESULT_IMAGE_PATH)
 _frame_raw     = cv2.imread(FRAME_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
+_intro_raw     = cv2.imread(INTRO_IMAGE_PATH)
 
 if _bg_raw is None:
     print(f"[경고] 배경 이미지 없음: {BG_IMAGE_PATH} → 단색 배경 사용")
 if _bg_result_raw is None:
     print(f"[경고] 결과 배경 이미지 없음: {BG_RESULT_IMAGE_PATH}")
+if _intro_raw is None:
+    print(f"[경고] 인트로 이미지 없음: {INTRO_IMAGE_PATH}")
 if _frame_raw is None:
     print(f"[경고] 프레임 이미지 없음: {FRAME_IMAGE_PATH}")
 elif _frame_raw.shape[2] == 3:
@@ -428,6 +432,7 @@ def save_final(photos, session_dir):
 # ══════════════════════════════════════════════════════════════════
 #  상태 머신
 # ══════════════════════════════════════════════════════════════════
+STATE_INTRO     = 'intro'
 STATE_WAITING   = 'waiting'
 STATE_COUNTDOWN = 'countdown'
 STATE_FLASH     = 'flash'
@@ -472,7 +477,7 @@ print("=" * 55)
 cv2.namedWindow('PhotoBooth', cv2.WINDOW_NORMAL)
 cv2.setWindowProperty('PhotoBooth', cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
-state           = STATE_WAITING
+state           = STATE_INTRO
 photos          = []
 countdown_start = None
 flash_start     = None
@@ -641,9 +646,14 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 else:
                     _draw_cursor_icon(frame, ix, iy)
 
-        # 팔레트 표시 (리뷰/결과 제외)
-        if state not in (STATE_REVIEW, STATE_RESULT):
+        # 팔레트 표시 (리뷰/결과/인트로 제외)
+        if state not in (STATE_INTRO, STATE_REVIEW, STATE_RESULT):
             _draw_color_palette(frame, color_idx)
+
+        # ── open → 인트로에서 시작
+        if gesture == 'open' and last_gesture != 'open' and state == STATE_INTRO:
+            state = STATE_WAITING
+            print("촬영 시작!")
 
         # ── open → 리뷰/결과 초기화
         if gesture == 'open' and last_gesture != 'open' and state in (STATE_REVIEW, STATE_RESULT):
@@ -718,7 +728,14 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
         # ── 캔버스 합성
         canvas = _bg_resized.copy()
 
-        if state == STATE_RESULT:
+        if state == STATE_INTRO:
+            if _intro_raw is not None:
+                canvas = cv2.resize(_intro_raw, (canvas.shape[1], canvas.shape[0]))
+            else:
+                cv2.putText(canvas, "Open Palm to Start", (100, canvas.shape[0] // 2),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, BLACK, 2, cv2.LINE_AA)
+
+        elif state == STATE_RESULT:
             # ── 결과 페이지: background.png + 중앙 콜라주 + 좌상단 소형 리플레이 + 우상단 QR
             if _bg_result_raw is not None:
                 canvas = _bg_result_raw.copy()
@@ -751,19 +768,14 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 cv2.putText(canvas, "QR scan to save", (qx, qy + QR_SIZE + 16),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, GRAY, 1, cv2.LINE_AA)
 
-            # 이메일 상태 표시
             if email_status == 'sending':
-                msg      = "Sending email..."
-                msg_col  = (0, 165, 255)
+                msg, msg_col = "Sending email...", (0, 165, 255)
             elif email_status == 'sent':
-                msg      = "Email sent!"
-                msg_col  = (0, 200, 80)
+                msg, msg_col = "Email sent!",      (0, 200, 80)
             elif email_status == 'error':
-                msg      = "Email failed"
-                msg_col  = (0, 0, 220)
+                msg, msg_col = "Email failed",     (0, 0, 220)
             else:
-                msg      = "Thumb Up to send email"
-                msg_col  = GRAY
+                msg, msg_col = "Thumb Up to send email", GRAY
 
             tw = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
             ex = (canvas.shape[1] - tw) // 2

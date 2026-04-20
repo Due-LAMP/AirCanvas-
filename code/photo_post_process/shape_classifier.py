@@ -17,35 +17,36 @@ from pathlib import Path
 MODEL_PATH = Path(__file__).parent / "models" / "sketch_classifier.pt"
 
 # ──────────────────────────────────────────────────────────────
-# Shape → inpainting prompt 매핑
+# Shape → inpainting subject 매핑
 # ──────────────────────────────────────────────────────────────
 SHAPE_TO_PROMPT: dict[str, str] = {
     # ── 자연/날씨 ──
-    "heart":        "a shiny glossy red heart sticker",
-    "star":         "a glittery golden five-pointed star sticker",
-    "cloud":        "a fluffy white cloud sticker",
-    "moon":         "a glowing crescent moon sticker with sparkles",
-    "rainbow":      "a colorful rainbow arc sticker",
-    "lightning":    "a bright yellow lightning bolt sticker",
-    "fire":         "a vivid orange flame fire sticker",
-    "flower":       "a blooming colorful daisy flower sticker",
-    "leaf":         "a green shiny leaf sticker",
-    "butterfly":    "a beautiful colorful butterfly sticker",
+    "heart":        "a heart",
+    "star":         "a five-pointed star",
+    "cloud":        "a cloud",
+    "moon":         "a crescent moon",
+    "rainbow":      "a rainbow arc",
+    "lightning":    "a lightning bolt",
+    "fire":         "a flame fire",
+    "flower":       "a daisy flower",
+    "leaf":         "a leaf",
+    "butterfly":    "a butterfly",
     # ── 패션/소품 ──
-    "sunglasses":   "a cool retro sunglasses sticker",
-    "crown":        "a shiny golden crown sticker with gems",
-    "hat":          "a cute party hat sticker",
-    "bow":          "a cute pink ribbon bow sticker",
-    "diamond":      "a sparkling blue diamond gem sticker",
-    "cat_ears":     "a cute fluffy cat ears sticker with pink inner",
-    "rabbit_ears":  "a cute long bunny rabbit ears sticker",
-    "whiskers":     "a cute cat whiskers sticker with three lines on each side",
+    "sunglasses":   "sunglasses",
+    "crown":        "a crown",
+    "hat":          "a party hat",
+    "bow":          "a ribbon bow",
+    "diamond":      "a diamond gem",
+    "cat_ears":     "cat ears",
+    "rabbit_ears":  "bunny ears",
+    "mustache":      "a mustache",
+    "whiskers":     "cat whiskers",
     # ── 기타 ──
-    "arrow":        "a bold colorful directional arrow sticker",
-    "music_note":   "a shiny musical note sticker",
-    "speech_bubble":"a white speech bubble with outline sticker",
-    "bomb":         "a cartoon round bomb sticker with fuse",
-    "unknown":      "a decorative fun sticker",
+    "arrow":        "an arrow",
+    "music_note":   "a musical note",
+    "speech_bubble":"a speech bubble",
+    "bomb":         "a cartoon bomb",
+    "unknown":      "a decorative accessory",
 }
 
 # CLIP 후보 텍스트 — 각 shape의 손그림 특징을 설명
@@ -65,14 +66,15 @@ _CLIP_CANDIDATES = {
     "sunglasses":   "a hand-drawn sunglasses shape with two round lenses, sketch",
     "crown":        "a hand-drawn crown shape with pointed tips on top, sketch",
     "hat":          "a hand-drawn party hat or top hat shape, sketch",
-    "bow":          "a hand-drawn ribbon bow shape with two loops, sketch",
-    "diamond":      "a hand-drawn diamond or rhombus gem shape, sketch",
-    "cat_ears":     "a hand-drawn two cat ears shape on top, pointy triangular ears, sketch",
-    "rabbit_ears":  "a hand-drawn two long tall bunny rabbit ears shape on top, sketch",
-    "whiskers":     "a hand-drawn cat whiskers shape, horizontal lines extending from center, sketch",
+    "bow":          "a hand-drawn ribbon bow shape with two rounded side loops and a center knot, sketch",
+    "diamond":      "a hand-drawn diamond or rhombus gem shape, a single closed polygon, sketch",
+    "cat_ears":     "a hand-drawn cat ears sketch, either a closed simple shape with two pointed triangular ears connected together, or a wearable cat ears accessory above a person's head with the bottom open like a headband silhouette, sketch",
+    "rabbit_ears":  "a hand-drawn bunny ears sketch, either a closed simple shape with two long upright ears connected together, or a wearable bunny ears accessory above a person's head with the bottom open like a headband silhouette, sketch",
+    "mustache":     "a hand-drawn mustache shape with two symmetrical curved parts spreading left and right from the center, sketch",
+    "whiskers":     "a hand-drawn cat whiskers shape, several thin horizontal lines spreading left and right from the center, sketch",
     # ── 기타 ──
-    "arrow":        "a hand-drawn arrow shape pointing a direction, sketch",
-    "music_note":   "a hand-drawn musical note shape, sketch",
+    "arrow":        "a hand-drawn arrow shape with one shaft and one pointed arrowhead showing direction, sketch",
+    "music_note":   "a hand-drawn musical note shape with a round note head and a thin vertical stem, sketch",
     "speech_bubble":"a hand-drawn speech bubble or chat balloon shape, sketch",
     "bomb":         "a hand-drawn round bomb shape with a fuse on top, sketch",
 }
@@ -94,20 +96,26 @@ def _load_clip():
     return _clip_model, _clip_processor
 
 
-def classify(mask_path) -> tuple[str, str]:
+def classify(mask_path) -> tuple[str, str, float | None]:
     """
     마스크 이미지에서 shape을 분류한다.
 
     Returns:
-        (shape_name, inpaint_prompt)
+        (shape_name, inpaint_prompt, clip_top1_confidence)
     """
     mask_path = Path(mask_path)
+
+    ear_shape = _classify_ear_accessory(mask_path)
+    if ear_shape is not None:
+        print(f"  귀 액세서리 규칙 기반 분류: {ear_shape}")
+        prompt = SHAPE_TO_PROMPT.get(ear_shape, SHAPE_TO_PROMPT["unknown"])
+        return ear_shape, prompt, 1.0
 
     # 우선순위 1: CLIP zero-shot
     try:
         import transformers  # noqa: F401
         print("  CLIP zero-shot으로 분류 시도...")
-        shape = _classify_with_clip(mask_path)
+        shape, confidence = _classify_with_clip(mask_path)
     except ImportError:
         # 우선순위 2: YOLO
         if MODEL_PATH.exists():
@@ -116,15 +124,84 @@ def classify(mask_path) -> tuple[str, str]:
         else:
             print("  OpenCV 컨투어 분석으로 분류 시도...")
             shape = _classify_with_opencv(mask_path)
+        confidence = None
 
     prompt = SHAPE_TO_PROMPT.get(shape, SHAPE_TO_PROMPT["unknown"])
-    return shape, prompt
+    return shape, prompt, confidence
+
+
+def _classify_ear_accessory(mask_path: Path) -> str | None:
+    """분리된 두 개의 귀 실루엣을 규칙 기반으로 먼저 분류한다."""
+    img = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+
+    height, width = binary.shape
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [contour for contour in contours if cv2.contourArea(contour) >= 150]
+    if len(contours) != 2:
+        return None
+
+    contours = sorted(contours, key=lambda contour: cv2.boundingRect(contour)[0])
+    features = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        rect_area = max(1, w * h)
+        fill_ratio = area / rect_area
+        epsilon = 0.04 * cv2.arcLength(contour, True)
+        vertices = len(cv2.approxPolyDP(contour, epsilon, True))
+        features.append({
+            "x": x,
+            "y": y,
+            "w": w,
+            "h": h,
+            "area": area,
+            "aspect": w / h if h > 0 else 999,
+            "fill_ratio": fill_ratio,
+            "vertices": vertices,
+        })
+
+    left, right = features
+    gap = right["x"] - (left["x"] + left["w"])
+    avg_height = (left["h"] + right["h"]) / 2
+    avg_width = (left["w"] + right["w"]) / 2
+    avg_aspect = (left["aspect"] + right["aspect"]) / 2
+    avg_fill = (left["fill_ratio"] + right["fill_ratio"]) / 2
+    avg_vertices = (left["vertices"] + right["vertices"]) / 2
+
+    if gap < -10 or gap > avg_height * 0.9:
+        return None
+    if left["y"] > height * 0.35 or right["y"] > height * 0.35:
+        return None
+    if left["h"] < height * 0.18 or right["h"] < height * 0.18:
+        return None
+    if abs(left["h"] - right["h"]) / max(left["h"], right["h"]) > 0.35:
+        return None
+    if abs(left["area"] - right["area"]) / max(left["area"], right["area"]) > 0.45:
+        return None
+    if left["aspect"] > 1.0 or right["aspect"] > 1.0:
+        return None
+
+    # 토끼 귀: 더 길고 가늘며, 곡선이 많아 꼭짓점 수가 비교적 많다.
+    if avg_aspect < 0.68 and avg_height / max(avg_width, 1) > 1.6 and avg_vertices >= 5:
+        return "rabbit_ears"
+
+    # 고양이 귀: 상대적으로 짧고 삼각형에 가까워 채움 비율이 낮고 꼭짓점 수가 적다.
+    if avg_aspect < 0.95 and avg_fill < 0.62:
+        return "cat_ears"
+
+    return None
 
 
 # ──────────────────────────────────────────────────────────────
 # CLIP zero-shot 분류 (transformers 설치 시 자동 활성화)
 # ──────────────────────────────────────────────────────────────
-def _classify_with_clip(mask_path: Path) -> str:
+def _classify_with_clip(mask_path: Path) -> tuple[str, float]:
     import torch
     from PIL import Image
 
@@ -160,9 +237,9 @@ def _classify_with_clip(mask_path: Path) -> str:
     # 신뢰도 낮으면 OpenCV fallback
     if best_prob < 0.25:
         print(f"  신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
-        return _classify_with_opencv(mask_path)
+        return _classify_with_opencv(mask_path), best_prob
 
-    return best_label
+    return best_label, best_prob
 
 
 # ──────────────────────────────────────────────────────────────

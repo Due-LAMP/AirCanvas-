@@ -1,1 +1,4 @@
 mediapipe
+carvekit 
+pillow 
+opencv-python

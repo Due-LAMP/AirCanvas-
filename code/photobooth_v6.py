@@ -1,3 +1,4 @@
+import sys
 import cv2
 import mediapipe as mp
 import os
@@ -5,7 +6,18 @@ import numpy as np
 import time
 import signal
 import shutil
+import socket
+import threading
+import http.server
+import socketserver
 from datetime import datetime
+
+import qrcode
+from PIL import Image
+
+# Gmail API
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gmail_api'))
+from send_message import gmail_send_message_with_attachment
 
 # ══════════════════════════════════════════════════════════════════
 #  Ctrl+C 안전 종료
@@ -33,9 +45,9 @@ DRAW_PAINTING = 'painting'
 DRAW_ERASE    = 'erase'
 
 # ─── 홀드 타이밍 ──────────────────────────────────────────────
-HOLD_FIST    = 0.2   # fist 홀드 → painting ↔ erase 토글
-HOLD_CLEAR   = 0.5   # thumbdown 홀드 → 캔버스 전체 삭제
-HOLD_PHOTO   = 0.2   # victory 홀드 → 촬영
+HOLD_FIST    = 0.2
+HOLD_CLEAR   = 0.5
+HOLD_PHOTO   = 0.2
 
 # ─── 색상 팔레트 (카메라 내) ──────────────────────────────────
 PALETTE_CX      = 32
@@ -45,8 +57,9 @@ PALETTE_SPACING = 46
 _BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ─── 배경 / 네컷 프레임 PNG ────────────────────────────────────
-BG_IMAGE_PATH    = os.path.join(_BASE_DIR, 'image/background.png')
-FRAME_IMAGE_PATH = os.path.join(_BASE_DIR, 'image/4cut_frame2.png')
+BG_IMAGE_PATH        = os.path.join(_BASE_DIR, 'image/background_line.png')
+BG_RESULT_IMAGE_PATH = os.path.join(_BASE_DIR, 'image/background.png')
+FRAME_IMAGE_PATH     = os.path.join(_BASE_DIR, 'image/4cut_frame.png')
 
 # ─── 카메라 영역 ───────────────────────────────────────────────
 CAM_X  = 80
@@ -61,15 +74,20 @@ INFO_W = CAM_W
 # ─── 네컷 프레임 캔버스 배치 위치 ─────────────────────────────
 FRAME_X, FRAME_Y = 720, 10
 
-# ─── 사진 슬롯 (4cut_frame.png 내부 상대 좌표) ────────────────
-PHOTO_W, PHOTO_H = 155, 116
-
+# ─── 사진 슬롯 (4cut_frame.png 원본 좌표: x, y, w, h) ─────────
 PHOTO_SLOTS = [
-    (16,  13),
-    (16, 135),
-    (16, 257),
-    (16, 380),
+    (3,  38, 420, 217),
+    (3, 320, 420, 223),
+    (3, 628, 420, 186),
+    (3, 908, 420, 200),
 ]
+
+# ─── 화면 표시용 사진 크기 ────────────────────────────────────
+DISPLAY_PHOTO_W = 160
+DISPLAY_PHOTO_H = 120
+
+# ─── 저장용 사진 너비 (높이는 비율에 따라 자동 계산) ───────────
+SAVE_PHOTO_W = 340
 
 # ─── 컬러 ──────────────────────────────────────────────────────
 WHITE    = (255, 255, 255)
@@ -93,6 +111,63 @@ _VID_TMP  = os.path.join(SAVE_DIR, '_rec_tmp.avi')
 _VID_PLAY = os.path.join(SAVE_DIR, '_rec_play.avi')
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+# ─── HTTP 서버 포트 ────────────────────────────────────────────
+HTTP_PORT = 8080
+
+# ─── 결과 페이지 미니 영상 / QR 크기 ──────────────────────────
+MINI_W, MINI_H = 200, 150   # 좌상단 소형 리플레이
+QR_SIZE        = 150         # QR 코드 크기 (정사각형)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  로컬 IP / HTTP 서버
+# ══════════════════════════════════════════════════════════════════
+def _get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.254.254.254', 1))
+        return s.getsockname()[0]
+    except Exception:
+        return '127.0.0.1'
+    finally:
+        s.close()
+
+LOCAL_IP = _get_local_ip()
+print(f"[서버] 로컬 IP: {LOCAL_IP}:{HTTP_PORT}")
+
+
+class _QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=SAVE_DIR, **kwargs)
+
+    def log_message(self, *args):
+        pass
+
+
+class _ReuseServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+
+def _start_http_server():
+    with _ReuseServer(('', HTTP_PORT), _QuietHandler) as httpd:
+        httpd.serve_forever()
+
+
+threading.Thread(target=_start_http_server, daemon=True).start()
+print(f"[서버] http://{LOCAL_IP}:{HTTP_PORT} 에서 사진 서비스 중")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  QR 코드 생성 (OpenCV 이미지로 반환)
+# ══════════════════════════════════════════════════════════════════
+def _make_qr_cv(url, size=QR_SIZE):
+    qr = qrcode.QRCode(box_size=4, border=2)
+    qr.add_data(url)
+    qr.make(fit=True)
+    pil_img = qr.make_image(fill_color='black', back_color='white').convert('RGB')
+    pil_img = pil_img.resize((size, size), Image.NEAREST)
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
 
 # ══════════════════════════════════════════════════════════════════
 #  MediaPipe 설정
@@ -115,6 +190,8 @@ _GESTURE_MAP = {
     'Victory':     'peace',
     'Open_Palm':   'open',
     'Thumb_Down':  'thumbdown',
+    'Pointing_Up': 'cursor',
+    'Thumb_Up':    'thumbup',
 }
 
 
@@ -127,12 +204,11 @@ def _init_camera():
         if not cap.isOpened():
             cap.release()
             continue
-        # MJPG: C270은 640x480 이상에서 YUYV보다 훨씬 빠름
         cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
         cap.set(cv2.CAP_PROP_FPS, 30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 지연 최소화
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         ret, frame = cap.read()
         if ret and frame is not None and frame.ndim == 3:
             w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -152,11 +228,14 @@ if video is None:
 # ══════════════════════════════════════════════════════════════════
 #  배경 / 프레임 이미지 로드
 # ══════════════════════════════════════════════════════════════════
-_bg_raw    = cv2.imread(BG_IMAGE_PATH)
-_frame_raw = cv2.imread(FRAME_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
+_bg_raw        = cv2.imread(BG_IMAGE_PATH)
+_bg_result_raw = cv2.imread(BG_RESULT_IMAGE_PATH)
+_frame_raw     = cv2.imread(FRAME_IMAGE_PATH, cv2.IMREAD_UNCHANGED)
 
 if _bg_raw is None:
     print(f"[경고] 배경 이미지 없음: {BG_IMAGE_PATH} → 단색 배경 사용")
+if _bg_result_raw is None:
+    print(f"[경고] 결과 배경 이미지 없음: {BG_RESULT_IMAGE_PATH}")
 if _frame_raw is None:
     print(f"[경고] 프레임 이미지 없음: {FRAME_IMAGE_PATH}")
 elif _frame_raw.shape[2] == 3:
@@ -182,7 +261,6 @@ def _palette_positions(h):
 def _draw_color_palette(frame, color_idx):
     h         = frame.shape[0]
     positions = _palette_positions(h)
-
     for idx, ((cx, cy), color) in enumerate(zip(positions, PEN_COLORS)):
         is_sel = (idx == color_idx)
         r = PALETTE_RADIUS if is_sel else PALETTE_RADIUS - 4
@@ -260,14 +338,14 @@ def _render_frame(canvas, photos):
     nw, nh  = int(fw * scale), int(fh * scale)
     frame_disp = cv2.resize(_frame_raw, (nw, nh))
 
-    for i, (sx, sy) in enumerate(PHOTO_SLOTS):
+    for i, (sx, sy, sw, sh) in enumerate(PHOTO_SLOTS):
         if i < len(photos):
             ph_s, pw_s = photos[i].shape[:2]
-            ps = min(PHOTO_W / pw_s, PHOTO_H / ph_s)
+            ps = min(DISPLAY_PHOTO_W / pw_s, DISPLAY_PHOTO_H / ph_s)
             pw, ph = int(pw_s * ps), int(ph_s * ps)
             resized = cv2.resize(photos[i], (pw, ph))
-            ax  = FRAME_X + int(sx * scale) + (int(PHOTO_W * scale) - pw) // 2
-            ay  = FRAME_Y + int(sy * scale) + (int(PHOTO_H * scale) - ph) // 2
+            ax  = FRAME_X + int(sx * scale) + (int(sw * scale) - pw) // 2
+            ay  = FRAME_Y + int(sy * scale) + (int(sh * scale) - ph) // 2
             ay2 = min(ay + ph, canvas.shape[0])
             ax2 = min(ax + pw, canvas.shape[1])
             canvas[ay:ay2, ax:ax2] = resized[:ay2 - ay, :ax2 - ax]
@@ -284,13 +362,15 @@ def _render_frame(canvas, photos):
 #  정보 패널
 # ══════════════════════════════════════════════════════════════════
 _GESTURE_LABEL = {
-    'peace':    'PEACE',
-    'fist':     'FIST',
-    'open':     'OPEN',
-    'thumbdown':'THUMB DOWN',
+    'cursor':    'Pointing_Up',
+    'peace':     'Victory',
+    'fist':      'Closed_Fist',
+    'open':      'Open_Palm',
+    'thumbdown': 'Thumb_Down',
+    'thumbup':   'Thumb_Up',
 }
 _MODE_LABEL = {
-    DRAW_DEFAULT:  '',
+    DRAW_DEFAULT:  'DEFAULT',
     DRAW_PAINTING: 'PAINT',
     DRAW_ERASE:    'ERASE',
 }
@@ -299,19 +379,14 @@ def _draw_info_panel(canvas, gesture, result, draw_mode):
     x, y, w = INFO_X, INFO_Y, INFO_W
     cy = y + 14
 
-    parts = []
     if result is not None and result.hand_landmarks:
-        g = _GESTURE_LABEL.get(gesture, 'DRAW')
-        parts.append(g)
-    m = _MODE_LABEL.get(draw_mode, '')
-    if m:
-        parts.append(f'[{m}]')
-
-    text = '  '.join(parts)
-    if text:
+        raw = result.gestures[0][0].category_name if result.gestures else 'None'
+        g = _GESTURE_LABEL.get(gesture, raw)
+        m = 'SHOOT' if gesture == 'peace' else 'RESET' if gesture == 'thumbdown' else _MODE_LABEL.get(draw_mode, 'DEFAULT')
+        text = f'{g} [{m}]'
         tw = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
         cv2.putText(canvas, text, (x + w // 2 - tw // 2, cy + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 200, 255), 1, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, BLACK, 1, cv2.LINE_AA)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -327,14 +402,14 @@ def save_final(photos, session_dir):
         fh, fw = _frame_raw.shape[:2]
         collage = np.ones((fh, fw, 3), dtype=np.uint8) * 255
 
-        for i, (sx, sy) in enumerate(PHOTO_SLOTS):
+        for i, (sx, sy, sw, sh) in enumerate(PHOTO_SLOTS):
             if i < len(photos):
                 ph_s, pw_s = photos[i].shape[:2]
-                s  = min(PHOTO_W / pw_s, PHOTO_H / ph_s)
-                pw, ph = int(pw_s * s), int(ph_s * s)
+                pw = SAVE_PHOTO_W
+                ph = int(ph_s * (pw / pw_s))
                 resized = cv2.resize(photos[i], (pw, ph))
-                ox  = sx + (PHOTO_W - pw) // 2
-                oy  = sy + (PHOTO_H - ph) // 2
+                ox  = sx + (sw - pw) // 2
+                oy  = sy + (sh - ph) // 2
                 oy2 = min(oy + ph, fh)
                 ox2 = min(ox + pw, fw)
                 collage[oy:oy2, ox:ox2] = resized[:oy2 - oy, :ox2 - ox]
@@ -357,19 +432,40 @@ STATE_WAITING   = 'waiting'
 STATE_COUNTDOWN = 'countdown'
 STATE_FLASH     = 'flash'
 STATE_REVIEW    = 'review'
+STATE_RESULT    = 'result'
+
+REVIEW_SEC = 5
+
+
+# ══════════════════════════════════════════════════════════════════
+#  이메일 전송 (백그라운드 스레드)
+# ══════════════════════════════════════════════════════════════════
+email_status = None   # None | 'sending' | 'sent' | 'error'
+
+def _send_email_async(attachment_path):
+    global email_status
+    print(f"[이메일] 전송 중: {attachment_path}")
+    result = gmail_send_message_with_attachment(attachment_path)
+    if result:
+        email_status = 'sent'
+        print("[이메일] 전송 완료!")
+    else:
+        email_status = 'error'
+        print("[이메일] 전송 실패")
 
 
 # ══════════════════════════════════════════════════════════════════
 #  메인 루프
 # ══════════════════════════════════════════════════════════════════
 print("=" * 55)
-print("  인생네컷 포토부스  v6")
+print("  인생네컷 포토부스  v6 + QR + Email")
 print("=" * 55)
 print("  peace          : 촬영")
 print("  hand (기본)    : 팔레트 터치로 색 변경 / 커서")
 print("  fist 0.2s 홀드 : PAINT ↔ ERASE 전환")
 print("  thumb down     : DEFAULT 모드로 복귀")
-print("  open           : 캔버스 지우기 (리뷰 시 초기화)")
+print("  open           : 캔버스 지우기 (리뷰/결과 시 초기화)")
+print("  thumb up       : [결과 화면] 이메일 전송")
 print("  ESC / q        : 종료")
 print("=" * 55)
 
@@ -388,16 +484,20 @@ color_idx      = 0
 drawing_color  = PEN_COLORS[color_idx]
 line_thickness = 5
 
-draw_mode           = DRAW_DEFAULT
-fist_start          = None
-fist_toggled        = False
-thumbdown_start     = None
-thumbdown_fired     = False
-victory_start       = None
-victory_fired       = False
+draw_mode       = DRAW_DEFAULT
+fist_start      = None
+fist_toggled    = False
+thumbdown_start = None
+thumbdown_fired = False
+victory_start   = None
+victory_fired   = False
 
-out_writer  = None
-review_cap  = None
+out_writer     = None
+review_cap     = None
+review_start   = None
+result_collage = None
+qr_img         = None
+session_dir    = None
 
 with GestureRecognizer.create_from_options(_mp_options) as recognizer:
     while True:
@@ -405,10 +505,15 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
         if not ret or _exit_requested:
             break
 
-        frame        = cv2.flip(frame, 1)
+        frame = cv2.flip(frame, 1)
+        # 16:9 → 4:3 센터 크롭 (1280x720 → 960x720)
+        fh, fw = frame.shape[:2]
+        target_w = fh * 4 // 3
+        x0 = (fw - target_w) // 2
+        frame = frame[:, x0:x0 + target_w]
         cam_h, cam_w = frame.shape[:2]
-        now          = time.time()
-        frame_clean  = frame.copy()
+        now         = time.time()
+        frame_clean = frame.copy()
 
         if draw_canvas is None:
             draw_canvas = np.zeros((cam_h, cam_w, 3), dtype=np.uint8)
@@ -421,7 +526,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 total_h = max(CAM_Y + CAM_H, FRAME_Y + (_frame_raw.shape[0] if _frame_raw is not None else 580)) + 20
                 _bg_resized = np.full((total_h, total_w, 3), BG_COLOR, dtype=np.uint8)
 
-        if out_writer is None and state != STATE_REVIEW:
+        if out_writer is None and state not in (STATE_REVIEW, STATE_RESULT):
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             writer = cv2.VideoWriter(_VID_TMP, fourcc, FPS, (cam_w, cam_h))
             if writer.isOpened():
@@ -455,7 +560,6 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 iy      = int(hand_landmarks[8].y * cam_h)
 
                 if gesture == 'open':
-                    # 즉시 DEFAULT 모드 전환
                     draw_mode      = DRAW_DEFAULT
                     prev_x, prev_y = None, None
 
@@ -492,6 +596,15 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                         victory_fired   = True
                     prev_x, prev_y = None, None
 
+                elif gesture == 'thumbup':
+                    # 결과 화면에서 엄지 → 이메일 전송
+                    if (state == STATE_RESULT and last_gesture != 'thumbup'
+                            and session_dir is not None and email_status is None):
+                        attachment = os.path.join(session_dir, "4cut.jpg")
+                        email_status = 'sending'
+                        threading.Thread(target=_send_email_async, args=(attachment,), daemon=True).start()
+                    prev_x, prev_y = None, None
+
                 else:
                     if state != STATE_COUNTDOWN:
                         hit = _palette_hit(ix, iy, cam_h)
@@ -505,7 +618,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                                          drawing_color, line_thickness)
                             prev_x, prev_y = ix, iy
                         elif draw_mode == DRAW_ERASE:
-                            cv2.circle(draw_canvas, (ix, iy), line_thickness * 4, BLACK, -1)
+                            cv2.circle(draw_canvas, (ix, iy), line_thickness * 4 + 1, BLACK, -1)
                             prev_x, prev_y = None, None
                         else:
                             prev_x, prev_y = None, None
@@ -528,13 +641,17 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 else:
                     _draw_cursor_icon(frame, ix, iy)
 
-        # 팔레트 표시 (리뷰 제외)
-        if state != STATE_REVIEW:
+        # 팔레트 표시 (리뷰/결과 제외)
+        if state not in (STATE_REVIEW, STATE_RESULT):
             _draw_color_palette(frame, color_idx)
 
-        # ── open → 리뷰 초기화
-        if gesture == 'open' and last_gesture != 'open' and state == STATE_REVIEW:
-            photos     = []
+        # ── open → 리뷰/결과 초기화
+        if gesture == 'open' and last_gesture != 'open' and state in (STATE_REVIEW, STATE_RESULT):
+            photos         = []
+            result_collage = None
+            qr_img         = None
+            review_start   = None
+            email_status   = None
             if review_cap:
                 review_cap.release()
                 review_cap = None
@@ -561,6 +678,12 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 if len(photos) >= TOTAL_SHOTS:
                     session_dir = os.path.join(SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
                     save_final(photos, session_dir)
+                    result_collage = cv2.imread(os.path.join(session_dir, "4cut.jpg"))
+                    session_name   = os.path.basename(session_dir)
+                    qr_url         = f"http://{LOCAL_IP}:{HTTP_PORT}/{session_name}/4cut.jpg"
+                    qr_img         = _make_qr_cv(qr_url)
+                    email_status   = None
+                    print(f"[QR] {qr_url}")
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:
@@ -571,16 +694,21 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                     if os.path.exists(_VID_TMP):
                         shutil.copy2(_VID_TMP, _VID_PLAY)
                         review_cap = cv2.VideoCapture(_VID_PLAY)
-                    state = STATE_REVIEW
+                    state        = STATE_REVIEW
+                    review_start = now
                 else:
                     state = STATE_WAITING
 
+        elif state == STATE_REVIEW:
+            if review_start is not None and now - review_start >= REVIEW_SEC:
+                state = STATE_RESULT
+
         # ── 녹화
-        if out_writer and out_writer is not False and state != STATE_REVIEW:
+        if out_writer and out_writer is not False and state not in (STATE_REVIEW, STATE_RESULT):
             out_writer.write(frame_clean)
 
         # ── 그리기 합성
-        if state != STATE_REVIEW:
+        if state not in (STATE_REVIEW, STATE_RESULT):
             gray_m  = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
             _, msk  = cv2.threshold(gray_m, 1, 255, cv2.THRESH_BINARY)
             msk_inv = cv2.bitwise_not(msk)
@@ -589,9 +717,62 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
 
         # ── 캔버스 합성
         canvas = _bg_resized.copy()
-        _render_frame(canvas, photos)
 
-        if state == STATE_REVIEW:
+        if state == STATE_RESULT:
+            # ── 결과 페이지: background.png + 중앙 콜라주 + 좌상단 소형 리플레이 + 우상단 QR
+            if _bg_result_raw is not None:
+                canvas = _bg_result_raw.copy()
+
+            # 중앙 콜라주
+            if result_collage is not None:
+                ch, cw   = result_collage.shape[:2]
+                disp_h   = canvas.shape[0] - 40
+                disp_w   = int(cw * disp_h / ch)
+                cx0      = (canvas.shape[1] - disp_w) // 2
+                cy0      = 20
+                canvas[cy0:cy0 + disp_h, cx0:cx0 + disp_w] = cv2.resize(result_collage, (disp_w, disp_h))
+
+            # 좌상단 소형 리플레이
+            if review_cap:
+                ret_v, vframe = review_cap.read()
+                if not ret_v:
+                    review_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret_v, vframe = review_cap.read()
+                if ret_v and vframe is not None:
+                    canvas[10:10 + MINI_H, 10:10 + MINI_W] = cv2.resize(vframe, (MINI_W, MINI_H))
+                cv2.rectangle(canvas, (10, 10), (10 + MINI_W, 10 + MINI_H), WHITE, 1)
+
+            # 우상단 QR 코드
+            if qr_img is not None:
+                qx = 10 + MINI_W + 15
+                qy = 10
+                canvas[qy:qy + QR_SIZE, qx:qx + QR_SIZE] = qr_img
+                cv2.rectangle(canvas, (qx, qy), (qx + QR_SIZE, qy + QR_SIZE), GRAY, 1)
+                cv2.putText(canvas, "QR scan to save", (qx, qy + QR_SIZE + 16),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, GRAY, 1, cv2.LINE_AA)
+
+            # 이메일 상태 표시
+            if email_status == 'sending':
+                msg      = "Sending email..."
+                msg_col  = (0, 165, 255)
+            elif email_status == 'sent':
+                msg      = "Email sent!"
+                msg_col  = (0, 200, 80)
+            elif email_status == 'error':
+                msg      = "Email failed"
+                msg_col  = (0, 0, 220)
+            else:
+                msg      = "Thumb Up to send email"
+                msg_col  = GRAY
+
+            tw = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
+            ex = (canvas.shape[1] - tw) // 2
+            ey = canvas.shape[0] - 14
+            cv2.putText(canvas, msg, (ex, ey),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, msg_col, 1, cv2.LINE_AA)
+
+        elif state == STATE_REVIEW:
+            _render_frame(canvas, photos)
             if review_cap:
                 ret_v, vframe = review_cap.read()
                 if not ret_v:
@@ -605,6 +786,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 1, cv2.LINE_AA)
 
         else:
+            _render_frame(canvas, photos)
             canvas[CAM_Y:CAM_Y + CAM_H, CAM_X:CAM_X + CAM_W] = cv2.resize(frame, (CAM_W, CAM_H))
 
             if state == STATE_COUNTDOWN:

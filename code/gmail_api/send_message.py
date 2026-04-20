@@ -22,8 +22,9 @@ SCOPES = ['https://www.googleapis.com/auth/gmail.send']
 def get_credentials():
   """OAuth 2.0 인증을 통해 credentials 가져오기"""
   creds = None
-  token_path = '../token.json'
-  creds_path = '../credentials.json'
+  _dir = os.path.dirname(os.path.abspath(__file__))
+  token_path = os.path.join(_dir, '../token.json')
+  creds_path = os.path.join(_dir, '../credentials.json')
   
   # token.json에 저장된 인증 정보 로드
   if os.path.exists(token_path):
@@ -61,7 +62,7 @@ def gmail_send_message_with_attachment(attachment_filename):
     
     # MIME 메시지 생성
     message = MIMEMultipart()
-    message["To"] = "jhkmo51@gmail.com"
+    message["To"] = "tlsdbfk0000@gmail.com"
     message["From"] = "jhkmo51@gmail.com"
     message["Subject"] = "📸 Your 4-Cut Photo is Here!"
     
@@ -150,7 +151,7 @@ def gmail_send_message():
 
     message.set_content("This is automated mail from Photobooth")
 
-    message["To"] = "jhkmo51@gmail.com"
+    message["To"] = "tlsdbfk0000@gmail.com"
     message["From"] = "jhkmo51@gmail.com"
     message["Subject"] = "Test message from Photobooth"
 
@@ -176,4 +177,5 @@ if __name__ == "__main__":
   # 첨부파일 있는 버전 실행
   gmail_send_message_with_attachment(
     attachment_filename = "/home/willtek/work/AirCanvas-/code/photobooth_output/20260415_141954/4cut.jpg"
+
   )

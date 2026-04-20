@@ -2,3 +2,12 @@
 __pycache__/
 .vscode/
 .vagl/
+
+# 로컬 생성물
+output/
+tmp/
+.tmp_mask_diag.py
+
+# 테스트 자산은 필요 시에만 추적
+input/
+background/

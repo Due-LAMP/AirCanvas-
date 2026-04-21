@@ -36,6 +36,23 @@ except Exception as _e:
     print(f'[경고] aircanvas_inpainting 로드 실패: {_e}')
     _INPAINTING_AVAILABLE = False
 
+try:
+    from carvekit.api.high import HiInterface as _HiInterface
+    _BG_REMOVER_AVAILABLE = True
+except Exception as _e:
+    print(f'[경고] carvekit 로드 실패 (배경 교체 비활성화): {_e}')
+    _BG_REMOVER_AVAILABLE = False
+
+_bg_remover_instance = None
+def _get_bg_remover():
+    global _bg_remover_instance
+    if _bg_remover_instance is None and _BG_REMOVER_AVAILABLE:
+        _bg_remover_instance = _HiInterface(
+            object_type='object', batch_size_seg=1, batch_size_matting=1,
+            device='cpu', seg_mask_size=640, matting_mask_size=2048,
+        )
+    return _bg_remover_instance
+
 # ══════════════════════════════════════════════════════════════════
 #  Ctrl+C 안전 종료
 # ══════════════════════════════════════════════════════════════════
@@ -466,11 +483,15 @@ def _draw_info_panel(canvas, gesture, result, draw_mode):
 # ══════════════════════════════════════════════════════════════════
 #  콜라주 저장
 # ══════════════════════════════════════════════════════════════════
-def save_final(photos, session_dir):
+def save_final(photos, session_dir, masks=None):
     os.makedirs(session_dir, exist_ok=True)
     for i, photo in enumerate(photos):
         cv2.imwrite(os.path.join(session_dir, f"shot_{i+1}.jpg"), photo)
         print(f"  저장: shot_{i+1}.jpg")
+        if masks is not None and i < len(masks):
+            mask_path = os.path.join(session_dir, f"shot_{i+1}_mask.png")
+            cv2.imwrite(mask_path, masks[i])
+            print(f"  저장: shot_{i+1}_mask.png")
 
     if _frame_raw is not None:
         fh, fw = _frame_raw.shape[:2]
@@ -522,10 +543,10 @@ def _fill_mask_interior(mask_bin):
     return cv2.bitwise_or(interior, mask_bin)
 
 
-def _pixelart_inpaint_one(img_bgr, mask_gray):
+def _pixelart_inpaint_one(img_bgr, mask_gray, style_preset='pixel-art'):
     """
-    마스크 영역을 shape 감지 후 pixel-art 스타일로 인페인팅.
-    main.py 의 step0 (shape) + step1_inpaint (pixel-art preset) 방식을 인라인 구현.
+    마스크 영역을 shape 감지 후 지정 스타일로 인페인팅.
+    style_preset: Stability AI style_preset 문자열
     """
     import io as _io
     from PIL import Image as _PILImage
@@ -549,9 +570,9 @@ def _pixelart_inpaint_one(img_bgr, mask_gray):
     mask_bytes = buf_mask.getvalue()
 
     # shape 감지 → 프롬프트
+    style_label = style_preset.replace('-', ' ')
     prompt = (
-        'pixel art object, 8-bit retro style, vivid saturated colors, '
-        'crisp clean pixels, no anti-aliasing, pixelated look, '
+        f'{style_label} style object, vivid colors, '
         'seamlessly blended with surrounding photo'
     )
     if _SHAPE_CLASSIFIER_AVAILABLE:
@@ -560,46 +581,91 @@ def _pixelart_inpaint_one(img_bgr, mask_gray):
         try:
             cv2.imwrite(tmp_path, mask_gray)
             shape_name, _, _conf = _classify_shape(tmp_path)
-            subject = shape_name.replace('_', ' ')
-            prompt = (
-                f'Add {subject} in pixel art style, '
-                '8-bit retro pixel art, vivid saturated colors, '
-                'crisp clean pixels, no anti-aliasing, pixelated look, '
-                'seamlessly blended with surrounding photo'
-            )
-            print(f'[AI] 픽셀아트 형태 감지: {shape_name}')
+            if shape_name != 'unknown':
+                subject = shape_name.replace('_', ' ')
+                prompt = (
+                    f'Add {subject} in {style_label} style, '
+                    'vivid colors, seamlessly blended with surrounding photo'
+                )
+            print(f'[AI] 형태 감지: {shape_name} / 스타일: {style_preset}')
         finally:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
 
-    result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset='pixel-art')
+    result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset=style_preset)
 
     arr = np.frombuffer(result_bytes, dtype=np.uint8)
     result_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if result_bgr is None:
-        raise RuntimeError('픽셀아트 응답 이미지 디코딩 실패')
+        raise RuntimeError('인페인팅 응답 이미지 디코딩 실패')
     return cv2.resize(result_bgr, (w, h))
 
 
-def _build_ai_4cut(clean_photos, masks, session_dir, bucket):
+def _remove_bg_composite(img_bgr, bg_bgr):
     """
-    백그라운드 스레드: clean 사진 4장에 pixel-art 인페인팅 → save_final 과 동일한
-    4cut 콜라주를 AI 버전으로 생성 → bucket['img'] (BGR ndarray) 에 저장.
+    carvekit으로 인물 배경 제거 후 bg_bgr 위에 합성. BGR ndarray 반환.
+    carvekit 없으면 원본 반환.
+    """
+    import io as _io
+    from PIL import Image as _PILImage, ImageFilter as _ImageFilter
+
+    remover = _get_bg_remover()
+    if remover is None:
+        print('[배경] carvekit 없음 → 배경 교체 스킵')
+        return img_bgr
+
+    h, w = img_bgr.shape[:2]
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = _PILImage.fromarray(img_rgb)
+
+    print('[배경] 인물 배경 제거 중 (carvekit)...')
+    rgba = remover([pil_img])[0]  # RGBA
+
+    # 알파 페더링
+    r, g, b, alpha = rgba.split()
+    alpha = alpha.filter(_ImageFilter.GaussianBlur(radius=2))
+    rgba = _PILImage.merge('RGBA', (r, g, b, alpha))
+
+    # bg_bgr → PIL RGBA
+    bg_rgb = cv2.cvtColor(cv2.resize(bg_bgr, (w, h)), cv2.COLOR_BGR2RGB)
+    bg_pil = _PILImage.fromarray(bg_rgb).convert('RGBA')
+
+    bg_pil.paste(rgba, (0, 0), mask=rgba)
+    result = np.array(bg_pil.convert('RGB'))
+    return cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+
+
+def _build_ai_4cut(clean_photos, masks, session_dir, bucket, theme_name, bg_img):
+    """
+    백그라운드 스레드:
+    1) bg_img 선택 시 → carvekit 배경 제거 후 합성
+    2) theme_name(style_preset) 으로 마스크 영역 인페인팅
+    → ai_4cut.jpg 저장 + bucket['img'] 에 BGR ndarray 저장
     """
     try:
         if not STABILITY_API_KEY:
             raise ValueError('STABILITY_API_KEY 환경변수가 설정되지 않았습니다.')
 
+        style_preset = theme_name if theme_name else 'pixel-art'
+        print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}')
+
         ai_photos = []
         for i, (clean, mask) in enumerate(zip(clean_photos[:4], masks[:4])):
-            print(f'[AI] 사진 {i+1}/4 픽셀아트 변환 중...')
+            print(f'[AI] 사진 {i+1}/4 처리 중...')
+
+            # Step 1: 배경 교체 (bg_img 선택 시)
+            base = clean.copy()
+            if bg_img is not None:
+                base = _remove_bg_composite(clean, bg_img)
+
+            # Step 2: 마스크 영역 인페인팅 (드로잉 있을 때만)
             has_drawing = (cv2.countNonZero(mask) > 0)
             if has_drawing:
-                out = _pixelart_inpaint_one(clean, mask)
+                out = _pixelart_inpaint_one(base, mask, style_preset=style_preset)
             else:
-                out = clean.copy()
+                out = base
             ai_photos.append(out)
 
         # save_final 과 동일한 4cut 콜라주 구성
@@ -623,17 +689,14 @@ def _build_ai_4cut(clean_photos, masks, session_dir, bucket):
             else:
                 collage = _frame_raw.copy()
         else:
-            # 프레임 없으면 그냥 세로 스택
             slot_h, slot_w = ai_photos[0].shape[:2]
             collage = np.vstack([cv2.resize(p, (slot_w, slot_h)) for p in ai_photos])
 
-        # 저장
         ai_path = os.path.join(session_dir, 'ai_4cut.jpg')
         cv2.imwrite(ai_path, collage)
-
         bucket['img']   = collage
         bucket['error'] = None
-        print(f'[AI] 픽셀아트 4cut 완료 → {ai_path}')
+        print(f'[AI] 완료 → {ai_path}')
 
     except Exception as e:
         import traceback
@@ -1044,7 +1107,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 print(f"[{len(photos)}/{TOTAL_SHOTS}] 촬영!")
                 if len(photos) >= TOTAL_SHOTS:
                     session_dir = os.path.join(SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
-                    save_final(photos, session_dir)
+                    save_final(photos, session_dir, masks=draw_masks)
                     result_collage = cv2.imread(os.path.join(session_dir, "4cut.jpg"))
                     session_name   = os.path.basename(session_dir)
                     qr_url         = f"http://{LOCAL_IP}:{HTTP_PORT}/{session_name}/4cut.jpg"
@@ -1057,11 +1120,12 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                         ai_collage = None
                         ai_thread_main = threading.Thread(
                             target=_build_ai_4cut,
-                            args=(list(photos_clean), list(draw_masks), session_dir, ai_bucket),
+                            args=(list(photos_clean), list(draw_masks), session_dir,
+                                  ai_bucket, selected_theme_name, selected_bg_img),
                             daemon=True,
                         )
                         ai_thread_main.start()
-                        print("[AI] 픽셀아트 4cut 생성 시작...")
+                        print(f'[AI] 생성 시작... 테마={selected_theme_name}, 배경={"있음" if selected_bg_img is not None else "없음"}')
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:

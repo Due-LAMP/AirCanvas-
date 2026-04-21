@@ -49,56 +49,64 @@ def get_credentials():
   return creds
 
 
-def gmail_send_message_with_attachment(attachment_filename):
+def gmail_send_message_with_attachment(attachment_filenames, recipient=None):
   """첨부파일이 있는 이메일 전송 (uploadType=media 사용)
+  attachment_filenames: str 또는 list[str]
   Returns: Message object, including message id
   """
   creds = get_credentials()
   if not creds:
     return None
-  
+
+  if isinstance(attachment_filenames, str):
+    attachment_filenames = [attachment_filenames]
+
   try:
     service = build("gmail", "v1", credentials=creds)
-    
+
     # MIME 메시지 생성
     message = MIMEMultipart()
-    message["To"] = "tlsdbfk0000@gmail.com"
+    message["To"] = recipient if recipient else "tlsdbfk0000@gmail.com"
     message["From"] = "jhkmo51@gmail.com"
-    message["Subject"] = "📸 Your 4-Cut Photo is Here!"
-    
+    message["Subject"] = "AirCanvas 네컷 사진이 도착했습니다!"
+
     # 본문 추가
-    body = MIMEText("""Hello!
+    body = MIMEText("""안녕하세요!
 
-Here are your amazing 4-cut photobooth pictures! 📷✨
+AirCanvas 네컷 사진이 도착했습니다.
+첨부파일을 확인해 주세요.
 
-Thank you for using our photobooth!
+이용해 주셔서 감사합니다!
 
-Best regards,
-4-Cut Photobooth Team
+AirCanvas 팀 드림
 """)
     message.attach(body)
-    
-    # 첨부파일 추가
-    if os.path.exists(attachment_filename):
+
+    # 첨부파일 추가 (여러 개 지원)
+    attached = False
+    for attachment_filename in attachment_filenames:
+      if not os.path.exists(attachment_filename):
+        print(f"❌ 첨부파일을 찾을 수 없습니다: {attachment_filename}")
+        continue
+
       content_type, encoding = mimetypes.guess_type(attachment_filename)
-      
       if content_type is None or encoding is not None:
         content_type = 'application/octet-stream'
-      
+
       main_type, sub_type = content_type.split('/', 1)
-      
+
       with open(attachment_filename, 'rb') as fp:
         if main_type == 'image':
           img = MIMEImage(fp.read(), _subtype=sub_type)
         else:
           img = MIMEBase(main_type, sub_type)
           img.set_payload(fp.read())
-      
-      filename = os.path.basename(attachment_filename)
-      img.add_header('Content-Disposition', 'attachment', filename=filename)
+
+      img.add_header('Content-Disposition', 'attachment', filename=os.path.basename(attachment_filename))
       message.attach(img)
-    else:
-      print(f"❌ 첨부파일을 찾을 수 없습니다: {attachment_filename}")
+      attached = True
+
+    if not attached:
       return None
     
     # RFC822 형식으로 변환

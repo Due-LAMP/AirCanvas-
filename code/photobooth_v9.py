@@ -35,6 +35,23 @@ except Exception as _e:
     print(f'[경고] aircanvas_inpainting 로드 실패: {_e}')
     _INPAINTING_AVAILABLE = False
 
+try:
+    from carvekit.api.high import HiInterface as _HiInterface
+    _BG_REMOVER_AVAILABLE = True
+except Exception as _e:
+    print(f'[경고] carvekit 로드 실패 (배경 교체 비활성화): {_e}')
+    _BG_REMOVER_AVAILABLE = False
+
+_bg_remover_instance = None
+def _get_bg_remover():
+    global _bg_remover_instance
+    if _bg_remover_instance is None and _BG_REMOVER_AVAILABLE:
+        _bg_remover_instance = _HiInterface(
+            object_type='object', batch_size_seg=1, batch_size_matting=1,
+            device='cpu', seg_mask_size=640, matting_mask_size=2048,
+        )
+    return _bg_remover_instance
+
 # ══════════════════════════════════════════════════════════════════
 #  Ctrl+C 안전 종료
 # ══════════════════════════════════════════════════════════════════
@@ -68,6 +85,37 @@ HOLD_FIST    = 0.2
 HOLD_CLEAR   = 0.5
 HOLD_PHOTO   = 0.2
 HOLD_RESET   = 3.0
+
+# ─── 테마 / 배경 선택 그리드 ───────────────────────────────────
+SOURCE_THEME_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme.png')
+SOURCE_THEME_CELLS   = [
+    (86,  190, 318, 346),   # 0: analog
+    (396, 190, 627, 346),   # 1: origami
+    (705, 190, 937, 346),   # 2: pixel art
+    (86,  398, 318, 554),   # 3: neon punk
+    (396, 398, 627, 554),   # 4: 3D model
+    (705, 398, 937, 554),   # 5: photographic
+]
+SOURCE_THEME_NAMES   = ['analog', 'origami', 'pixel-art', 'neon-punk', '3d-model', 'photographic']
+SOURCE_BG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background.PNG')
+SOURCE_BG_MASK_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background_mask.png')
+SOURCE_BG_COLS       = 4   # 가로 셀 수
+SOURCE_BG_ROWS       = 2   # 세로 행 수
+# 마스크에서 추출한 8개 칸의 실제 픽셀 좌표 (x1,y1,x2,y2) in 1024×600 원본 기준
+SOURCE_BG_CELLS = [
+    (47,  182, 253, 337),   # 0: white
+    (290, 182, 496, 337),   # 1: skyblue
+    (533, 182, 739, 337),   # 2: lightpink
+    (775, 182, 982, 337),   # 3: lightgreen
+    (47,  391, 253, 546),   # 4: beach
+    (290, 391, 496, 546),   # 5: space
+    (533, 391, 739, 546),   # 6: zombie
+    (775, 391, 982, 546),   # 7: chimchakman
+]
+SOURCE_BG_NAMES = [
+    'white', 'skyblue', 'lightpink', 'lightgreen',
+    'beach', 'space', 'zombie', 'chimchakman',
+]
 
 # ─── 색상 팔레트 (카메라 내) ──────────────────────────────────
 PALETTE_CX      = 32
@@ -269,6 +317,27 @@ elif _frame_raw.shape[2] == 3:
     _frame_raw = bgra
     print("[프레임] 알파채널 없음 → 흰색 투명 처리")
 
+# ── source_theme.png / source_background.PNG 로드 ──────────────────────
+_source_theme_img = cv2.imread(SOURCE_THEME_PATH)
+if _source_theme_img is None:
+    print(f"[경고] source_theme.png 로드 실패: {SOURCE_THEME_PATH}")
+else:
+    print(f"[테마 그리드] {_source_theme_img.shape[1]}x{_source_theme_img.shape[0]}, {len(SOURCE_THEME_CELLS)}개 칸")
+
+_source_bg_img = cv2.imread(SOURCE_BG_PATH)
+if _source_bg_img is None:
+    print(f"[경고] source_background.PNG 로드 실패: {SOURCE_BG_PATH}")
+else:
+    _sbh, _sbw = _source_bg_img.shape[:2]
+    print(f"[배경 그리드] {_sbw}x{_sbh}, {len(SOURCE_BG_CELLS)}개 칸 (마스크 기반)")
+
+selected_theme_name = None   # 선택된 테마 이름
+selected_bg_img     = None   # 선택된 배경 BGR ndarray
+theme_hovered_cell  = -1     # 테마 호버 셀 (0~5)
+bg_hovered_cell     = -1     # 배경 호버 셀 (0~7)
+select_peace_start  = None   # 선택 화면 Victory 홀드 시작 시각
+HOLD_SELECT         = 0.8    # 선택 확정에 필요한 Victory 홀드 시간 (초)
+
 _bg_resized = None
 
 
@@ -416,11 +485,15 @@ def _draw_info_panel(canvas, gesture, result, draw_mode):
 # ══════════════════════════════════════════════════════════════════
 #  콜라주 저장
 # ══════════════════════════════════════════════════════════════════
-def save_final(photos, session_dir):
+def save_final(photos, session_dir, masks=None):
     os.makedirs(session_dir, exist_ok=True)
     for i, photo in enumerate(photos):
         cv2.imwrite(os.path.join(session_dir, f"shot_{i+1}.jpg"), photo)
         print(f"  저장: shot_{i+1}.jpg")
+        if masks is not None and i < len(masks):
+            mask_path = os.path.join(session_dir, f"shot_{i+1}_mask.png")
+            cv2.imwrite(mask_path, masks[i])
+            print(f"  저장: shot_{i+1}_mask.png")
 
     if _frame_raw is not None:
         fh, fw = _frame_raw.shape[:2]
@@ -472,10 +545,10 @@ def _fill_mask_interior(mask_bin):
     return cv2.bitwise_or(interior, mask_bin)
 
 
-def _pixelart_inpaint_one(img_bgr, mask_gray):
+def _pixelart_inpaint_one(img_bgr, mask_gray, style_preset='pixel-art'):
     """
-    마스크 영역을 shape 감지 후 pixel-art 스타일로 인페인팅.
-    main.py 의 step0 (shape) + step1_inpaint (pixel-art preset) 방식을 인라인 구현.
+    마스크 영역을 shape 감지 후 지정 스타일로 인페인팅.
+    style_preset: Stability AI style_preset 문자열
     """
     import io as _io
     from PIL import Image as _PILImage
@@ -499,9 +572,9 @@ def _pixelart_inpaint_one(img_bgr, mask_gray):
     mask_bytes = buf_mask.getvalue()
 
     # shape 감지 → 프롬프트
+    style_label = style_preset.replace('-', ' ')
     prompt = (
-        'pixel art object, 8-bit retro style, vivid saturated colors, '
-        'crisp clean pixels, no anti-aliasing, pixelated look, '
+        f'{style_label} style object, vivid colors, '
         'seamlessly blended with surrounding photo'
     )
     if _SHAPE_CLASSIFIER_AVAILABLE:
@@ -510,46 +583,91 @@ def _pixelart_inpaint_one(img_bgr, mask_gray):
         try:
             cv2.imwrite(tmp_path, mask_gray)
             shape_name, _, _conf = _classify_shape(tmp_path)
-            subject = shape_name.replace('_', ' ')
-            prompt = (
-                f'Add {subject} in pixel art style, '
-                '8-bit retro pixel art, vivid saturated colors, '
-                'crisp clean pixels, no anti-aliasing, pixelated look, '
-                'seamlessly blended with surrounding photo'
-            )
-            print(f'[AI] 픽셀아트 형태 감지: {shape_name}')
+            if shape_name != 'unknown':
+                subject = shape_name.replace('_', ' ')
+                prompt = (
+                    f'Add {subject} in {style_label} style, '
+                    'vivid colors, seamlessly blended with surrounding photo'
+                )
+            print(f'[AI] 형태 감지: {shape_name} / 스타일: {style_preset}')
         finally:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
 
-    result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset='pixel-art')
+    result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset=style_preset)
 
     arr = np.frombuffer(result_bytes, dtype=np.uint8)
     result_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
     if result_bgr is None:
-        raise RuntimeError('픽셀아트 응답 이미지 디코딩 실패')
+        raise RuntimeError('인페인팅 응답 이미지 디코딩 실패')
     return cv2.resize(result_bgr, (w, h))
 
 
-def _build_ai_4cut(clean_photos, masks, session_dir, bucket):
+def _remove_bg_composite(img_bgr, bg_bgr):
     """
-    백그라운드 스레드: clean 사진 4장에 pixel-art 인페인팅 → save_final 과 동일한
-    4cut 콜라주를 AI 버전으로 생성 → bucket['img'] (BGR ndarray) 에 저장.
+    carvekit으로 인물 배경 제거 후 bg_bgr 위에 합성. BGR ndarray 반환.
+    carvekit 없으면 원본 반환.
+    """
+    import io as _io
+    from PIL import Image as _PILImage, ImageFilter as _ImageFilter
+
+    remover = _get_bg_remover()
+    if remover is None:
+        print('[배경] carvekit 없음 → 배경 교체 스킵')
+        return img_bgr
+
+    h, w = img_bgr.shape[:2]
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    pil_img = _PILImage.fromarray(img_rgb)
+
+    print('[배경] 인물 배경 제거 중 (carvekit)...')
+    rgba = remover([pil_img])[0]  # RGBA
+
+    # 알파 페더링
+    r, g, b, alpha = rgba.split()
+    alpha = alpha.filter(_ImageFilter.GaussianBlur(radius=2))
+    rgba = _PILImage.merge('RGBA', (r, g, b, alpha))
+
+    # bg_bgr → PIL RGBA
+    bg_rgb = cv2.cvtColor(cv2.resize(bg_bgr, (w, h)), cv2.COLOR_BGR2RGB)
+    bg_pil = _PILImage.fromarray(bg_rgb).convert('RGBA')
+
+    bg_pil.paste(rgba, (0, 0), mask=rgba)
+    result = np.array(bg_pil.convert('RGB'))
+    return cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+
+
+def _build_ai_4cut(clean_photos, masks, session_dir, bucket, theme_name, bg_img):
+    """
+    백그라운드 스레드:
+    1) bg_img 선택 시 → carvekit 배경 제거 후 합성
+    2) theme_name(style_preset) 으로 마스크 영역 인페인팅
+    → ai_4cut.jpg 저장 + bucket['img'] 에 BGR ndarray 저장
     """
     try:
         if not STABILITY_API_KEY:
             raise ValueError('STABILITY_API_KEY 환경변수가 설정되지 않았습니다.')
 
+        style_preset = theme_name if theme_name else 'pixel-art'
+        print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}')
+
         ai_photos = []
         for i, (clean, mask) in enumerate(zip(clean_photos[:4], masks[:4])):
-            print(f'[AI] 사진 {i+1}/4 픽셀아트 변환 중...')
+            print(f'[AI] 사진 {i+1}/4 처리 중...')
+
+            # Step 1: 배경 교체 (bg_img 선택 시)
+            base = clean.copy()
+            if bg_img is not None:
+                base = _remove_bg_composite(clean, bg_img)
+
+            # Step 2: 마스크 영역 인페인팅 (드로잉 있을 때만)
             has_drawing = (cv2.countNonZero(mask) > 0)
             if has_drawing:
-                out = _pixelart_inpaint_one(clean, mask)
+                out = _pixelart_inpaint_one(base, mask, style_preset=style_preset)
             else:
-                out = clean.copy()
+                out = base
             ai_photos.append(out)
 
         # save_final 과 동일한 4cut 콜라주 구성
@@ -583,7 +701,7 @@ def _build_ai_4cut(clean_photos, masks, session_dir, bucket):
 
         bucket['img']   = collage
         bucket['error'] = None
-        print(f'[AI] 픽셀아트 4cut 완료 → {ai_path}')
+        print(f'[AI] 완료 → {ai_path}')
 
     except Exception as e:
         import traceback
@@ -596,11 +714,13 @@ def _build_ai_4cut(clean_photos, masks, session_dir, bucket):
 # ══════════════════════════════════════════════════════════════════
 #  상태 머신
 # ══════════════════════════════════════════════════════════════════
-STATE_INTRO     = 'intro'
-STATE_WAITING   = 'waiting'
-STATE_COUNTDOWN = 'countdown'
-STATE_FLASH     = 'flash'
-STATE_REVIEW    = 'review'
+STATE_INTRO       = 'intro'
+STATE_SELECT_THEME = 'select_theme'
+STATE_SELECT_BG   = 'select_bg'
+STATE_WAITING     = 'waiting'
+STATE_COUNTDOWN   = 'countdown'
+STATE_FLASH       = 'flash'
+STATE_REVIEW      = 'review'
 STATE_RESULT      = 'result'
 STATE_EMAIL_INPUT = 'email_input'
 
@@ -639,16 +759,75 @@ def _send_email_async(attachment_path, recipient):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  선택 그리드 UI 함수
+# ══════════════════════════════════════════════════════════════════
+def _cell_hit(finger_x: int, finger_y: int, canvas_w: int, canvas_h: int, cells: list) -> int:
+    """손가락 좌표가 cells 중 어느 셀에 있는지 반환. 없으면 -1."""
+    src_w, src_h = 1024, 600
+    sx = finger_x * src_w / canvas_w
+    sy = finger_y * src_h / canvas_h
+    for i, (x1, y1, x2, y2) in enumerate(cells):
+        if x1 <= sx <= x2 and y1 <= sy <= y2:
+            return i
+    return -1
+
+
+def _draw_selection_grid(canvas, src_img, cells, hovered_cell: int,
+                         finger_x: int = -1, finger_y: int = -1) -> int:
+    """src_img를 전체 화면에 표시하고 cells 기준으로 호버 테두리를 그린다."""
+    ch, cw = canvas.shape[:2]
+    if src_img is None:
+        cv2.putText(canvas, "image not found", (50, ch // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, WHITE, 2)
+        return hovered_cell
+
+    canvas[:] = cv2.resize(src_img, (cw, ch))
+
+    hover = hovered_cell
+    if finger_x >= 0 and finger_y >= 0:
+        hit = _cell_hit(finger_x, finger_y, cw, ch, cells)
+        if hit >= 0:
+            hover = hit
+
+    if 0 <= hover < len(cells):
+        sx1, sy1, sx2, sy2 = cells[hover]
+        x1 = int(sx1 * cw / 1024)
+        y1 = int(sy1 * ch / 600)
+        x2 = int(sx2 * cw / 1024)
+        y2 = int(sy2 * ch / 600)
+        cv2.rectangle(canvas, (x1 + 2, y1 + 2), (x2 - 2, y2 - 2), (0, 0, 0), 6)
+        cv2.rectangle(canvas, (x1 + 2, y1 + 2), (x2 - 2, y2 - 2), (0, 220, 255), 3)
+
+    if finger_x >= 0 and finger_y >= 0:
+        cv2.circle(canvas, (finger_x, finger_y), 10, (0, 0, 0), 4)
+        cv2.circle(canvas, (finger_x, finger_y), 10, (0, 220, 255), 2)
+        cv2.circle(canvas, (finger_x, finger_y), 4, (0, 220, 255), -1)
+
+    return hover
+
+
+def _draw_theme_grid(canvas, hovered_cell, finger_x=-1, finger_y=-1):
+    return _draw_selection_grid(canvas, _source_theme_img, SOURCE_THEME_CELLS,
+                                hovered_cell, finger_x, finger_y)
+
+
+def _draw_bg_grid(canvas, hovered_cell, finger_x=-1, finger_y=-1):
+    return _draw_selection_grid(canvas, _source_bg_img, SOURCE_BG_CELLS,
+                                hovered_cell, finger_x, finger_y)
+
+
+# ══════════════════════════════════════════════════════════════════
 #  메인 루프
 # ══════════════════════════════════════════════════════════════════
 print("=" * 55)
-print("  인생네컷 포토부스  v6 + QR + Email")
+print("  인생네컷 포토부스  v9 + QR + Email + Theme/BG Select")
 print("=" * 55)
-print("  peace          : 촬영")
+print("  open           : 인트로 → 테마 선택 시작")
+print("  peace          : 촬영 / 선택 확정 (홀드)")
 print("  hand (기본)    : 팔레트 터치로 색 변경 / 커서")
 print("  fist 0.2s 홀드 : PAINT ↔ ERASE 전환")
 print("  thumb down     : DEFAULT 모드로 복귀")
-print("  open           : 캔버스 지우기 (리뷰/결과 시 초기화)")
+print("  open 3s 홀드   : 리뷰/결과/이메일 화면에서 초기화")
 print("  thumb up       : [결과 화면] 이메일 전송")
 print("  ESC / q        : 종료")
 print("=" * 55)
@@ -677,6 +856,8 @@ thumbdown_start = None
 thumbdown_fired = False
 victory_start   = None
 victory_fired   = False
+
+countdown_cooldown_until = 0.0   # 배경 선택 후 카운트다운 방지용
 
 out_writer     = None
 review_cap     = None
@@ -717,7 +898,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 total_h = max(CAM_Y + CAM_H, FRAME_Y + (_frame_raw.shape[0] if _frame_raw is not None else 580)) + 20
                 _bg_resized = np.full((total_h, total_w, 3), BG_COLOR, dtype=np.uint8)
 
-        if out_writer is None and state not in (STATE_INTRO, STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT):
+        if out_writer is None and state not in (STATE_INTRO, STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT, STATE_SELECT_THEME, STATE_SELECT_BG):
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             writer = cv2.VideoWriter(_VID_TMP, fourcc, FPS, (cam_w, cam_h))
             if writer.isOpened():
@@ -744,6 +925,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
             thumbdown_fired = False
             victory_start   = None
             victory_fired   = False
+            select_peace_start = None
         else:
             for i, hand_landmarks in enumerate(result.hand_landmarks):
                 raw     = result.gestures[i][0].category_name if result.gestures else 'None'
@@ -785,6 +967,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                         victory_fired = False
                     if (victory_start is not None and not victory_fired
                             and now - victory_start >= HOLD_PHOTO
+                            and now >= countdown_cooldown_until
                             and state == STATE_WAITING):
                         state           = STATE_COUNTDOWN
                         countdown_start = now
@@ -845,13 +1028,73 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                     _draw_cursor_icon(frame, ix, iy)
 
 
-        # ── open → 인트로에서 시작
+        # ── open → 인트로에서 테마 선택으로
         if gesture == 'open' and last_gesture != 'open' and state == STATE_INTRO:
-            state = STATE_WAITING
-            print("촬영 시작!")
+            state = STATE_SELECT_THEME
+            theme_hovered_cell = -1
+            print("→ 테마 선택")
+
+        # ── 테마 선택 제스처
+        if state == STATE_SELECT_THEME and result is not None and result.hand_landmarks:
+            hand = result.hand_landmarks[0]
+            fx = int(hand[8].x * cam_w)
+            fy = int(hand[8].y * cam_h)
+
+            if _source_theme_img is not None:
+                hit = _cell_hit(fx, fy, cam_w, cam_h, SOURCE_THEME_CELLS)
+                if hit >= 0:
+                    theme_hovered_cell = hit
+
+            if gesture == 'peace':
+                if select_peace_start is None:
+                    select_peace_start = now
+                elif now - select_peace_start >= HOLD_SELECT and theme_hovered_cell >= 0:
+                    selected_theme_name = SOURCE_THEME_NAMES[theme_hovered_cell]
+                    print(f"[테마 선택] 셀 {theme_hovered_cell} '{selected_theme_name}'")
+                    state = STATE_SELECT_BG
+                    bg_hovered_cell = -1
+                    select_peace_start = None
+                    countdown_cooldown_until = now + 1.5
+                    victory_start = None
+                    victory_fired = False
+            else:
+                select_peace_start = None
+
+        # ── 배경 선택 제스처 (Pointing_Up 커서 + Victory 확정)
+        if state == STATE_SELECT_BG and result is not None and result.hand_landmarks:
+            hand = result.hand_landmarks[0]
+            fx = int(hand[8].x * cam_w)
+            fy = int(hand[8].y * cam_h)
+
+            if _source_bg_img is not None:
+                hit = _cell_hit(fx, fy, cam_w, cam_h, SOURCE_BG_CELLS)
+                if hit >= 0:
+                    bg_hovered_cell = hit
+
+            # Victory → 홀드 후 선택 확정
+            if gesture == 'peace':
+                if select_peace_start is None:
+                    select_peace_start = now
+                elif now - select_peace_start >= HOLD_SELECT and bg_hovered_cell >= 0:
+                    if _source_bg_img is not None:
+                        sx1, sy1, sx2, sy2 = SOURCE_BG_CELLS[bg_hovered_cell]
+                        selected_bg_img = _source_bg_img[sy1:sy2, sx1:sx2].copy()
+                        row = bg_hovered_cell // SOURCE_BG_COLS
+                        col = bg_hovered_cell % SOURCE_BG_COLS
+                        name = SOURCE_BG_NAMES[bg_hovered_cell]
+                        print(f"[배경 선택] 셀 {bg_hovered_cell} '{name}'  (행{row+1} 열{col+1})  크기={selected_bg_img.shape[1]}x{selected_bg_img.shape[0]}")
+                    state = STATE_WAITING
+                    select_peace_start = None
+                    countdown_cooldown_until = now + 1.5
+                    victory_start = None
+                    victory_fired = False
+            else:
+                select_peace_start = None
 
         # ── open 3초 홀드 → 리뷰/결과/이메일 초기화
-        if gesture == 'open' and state in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT):
+        # gesture 또는 last_gesture 중 하나라도 open이면 타이머 유지 (1프레임 깜빡임 방지)
+        _open_held = (gesture == 'open' or last_gesture == 'open') and gesture != 'thumbup'
+        if _open_held and state in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT):
             if reset_start is None:
                 reset_start = now
             elif now - reset_start >= HOLD_RESET:
@@ -880,7 +1123,8 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 state       = STATE_INTRO
                 print("초기화 완료")
         else:
-            reset_start = None
+            if gesture != 'open' and last_gesture != 'open':
+                reset_start = None
 
         last_gesture = gesture
 
@@ -901,7 +1145,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 print(f"[{len(photos)}/{TOTAL_SHOTS}] 촬영!")
                 if len(photos) >= TOTAL_SHOTS:
                     session_dir = os.path.join(SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
-                    save_final(photos, session_dir)
+                    save_final(photos, session_dir, masks=draw_masks)
                     result_collage = cv2.imread(os.path.join(session_dir, "4cut.jpg"))
                     session_name   = os.path.basename(session_dir)
                     qr_url         = f"http://{LOCAL_IP}:{HTTP_PORT}/{session_name}/4cut.jpg"
@@ -914,11 +1158,12 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                         ai_collage = None
                         ai_thread_main = threading.Thread(
                             target=_build_ai_4cut,
-                            args=(list(photos_clean), list(draw_masks), session_dir, ai_bucket),
+                            args=(list(photos_clean), list(draw_masks), session_dir,
+                                  ai_bucket, selected_theme_name, selected_bg_img),
                             daemon=True,
                         )
                         ai_thread_main.start()
-                        print("[AI] 픽셀아트 4cut 생성 시작...")
+                        print(f'[AI] 생성 시작... 테마={selected_theme_name}, 배경={"있음" if selected_bg_img is not None else "없음"}')
 
         elif state == STATE_FLASH:
             if now - flash_start >= FLASH_SEC:
@@ -946,7 +1191,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 review_cap = cv2.VideoCapture(_VID_PLAY)
 
         # ── 그리기 합성
-        if state not in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT):
+        if state not in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT, STATE_SELECT_THEME, STATE_SELECT_BG):
             gray_m  = cv2.cvtColor(draw_canvas, cv2.COLOR_BGR2GRAY)
             _, msk  = cv2.threshold(gray_m, 1, 255, cv2.THRESH_BINARY)
             msk_inv = cv2.bitwise_not(msk)
@@ -954,7 +1199,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                               cv2.bitwise_and(draw_canvas, draw_canvas, mask=msk))
 
         # ── 녹화 (그리기 합성 후 → 그림 포함, 팔레트/UI 제외)
-        if out_writer and out_writer is not False and state not in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT):
+        if out_writer and out_writer is not False and state not in (STATE_REVIEW, STATE_RESULT, STATE_EMAIL_INPUT, STATE_SELECT_THEME, STATE_SELECT_BG):
             out_writer.write(frame)
 
         # ── 캔버스 합성
@@ -966,6 +1211,30 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
             else:
                 cv2.putText(canvas, "Open Palm to Start", (100, canvas.shape[0] // 2),
                             cv2.FONT_HERSHEY_SIMPLEX, 1.2, BLACK, 2, cv2.LINE_AA)
+
+        elif state == STATE_SELECT_THEME:
+            finger_x, finger_y = -1, -1
+            if result is not None and result.hand_landmarks:
+                hand = result.hand_landmarks[0]
+                finger_x = int(hand[8].x * canvas.shape[1])
+                finger_y = int(hand[8].y * canvas.shape[0])
+            theme_hovered_cell = _draw_theme_grid(canvas, theme_hovered_cell, finger_x, finger_y)
+            if select_peace_start is not None and finger_x >= 0:
+                prog = min((now - select_peace_start) / HOLD_SELECT, 1.0)
+                angle = int(-360 * prog)
+                cv2.ellipse(canvas, (finger_x, finger_y), (22, 22), -90, 0, angle, (0, 220, 255), 3)
+
+        elif state == STATE_SELECT_BG:
+            finger_x, finger_y = -1, -1
+            if result is not None and result.hand_landmarks:
+                hand = result.hand_landmarks[0]
+                finger_x = int(hand[8].x * canvas.shape[1])
+                finger_y = int(hand[8].y * canvas.shape[0])
+            bg_hovered_cell = _draw_bg_grid(canvas, bg_hovered_cell, finger_x, finger_y)
+            if select_peace_start is not None and finger_x >= 0:
+                prog = min((now - select_peace_start) / HOLD_SELECT, 1.0)
+                angle = int(-360 * prog)
+                cv2.ellipse(canvas, (finger_x, finger_y), (22, 22), -90, 0, angle, (0, 220, 255), 3)
 
         elif state in (STATE_RESULT, STATE_EMAIL_INPUT):
             # ── AI 결과 수신 체크
@@ -1032,7 +1301,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
 
             # 라이브 카메라 (좌측 하단, 높이 기준으로 크기 결정 → 자연스럽게 중앙 정렬)
             live_y = cy0 + TOP_H + PAD
-            live_h = BOT_H - LABEL_H
+            live_h = BOT_H - PAD - LABEL_H   # PAD 만큼 줄여서 오른쪽 라벨과 높이 맞춤
             live_w = live_h * 4 // 3
             if live_w > half_w:
                 live_w = half_w
@@ -1043,9 +1312,9 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
             # 보자기 홀드 진행 바
             if reset_start is not None:
                 progress = min((now - reset_start) / HOLD_RESET, 1.0)
-                bar_y = live_y + live_h + 4
-                cv2.rectangle(canvas, (live_x, bar_y), (live_x + live_w, bar_y + 5), (60, 60, 60), -1)
-                cv2.rectangle(canvas, (live_x, bar_y), (live_x + int(live_w * progress), bar_y + 5), BLACK, -1)
+                bar_y = live_y + live_h + 1
+                cv2.rectangle(canvas, (live_x, bar_y), (live_x + live_w, bar_y + 7), (180, 180, 180), -1)
+                cv2.rectangle(canvas, (live_x, bar_y), (live_x + int(live_w * progress), bar_y + 7), WHITE, -1)
 
             if email_status == 'sending':
                 email_msg = "Sending email..."

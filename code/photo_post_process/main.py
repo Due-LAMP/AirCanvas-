@@ -73,12 +73,13 @@ def build_inpaint_prompt(shape: str, subject_prompt: str, color_hint: str) -> st
     subject = subject.rstrip(".")
     color_clause = ""
     if color_hint:
-        color_clause = f" Use the original sketch colors, especially {color_hint}."
+        color_clause = f"Use the original sketch colors, especially {color_hint}."
     return (
-        f"Add {subject} naturally in the masked area. "
-        f"Match the person's pose, lighting, angle, and scale.{color_clause}."
-        "Keep the person's face, hair, body, and clothes unchanged." \
-        f"Do not generate person, face, or body parts in the masked area. Focus on the {subject} and make it look like a natural part of the photo."
+        f"Add {subject} naturally in the masked area.\n"
+        f"Match the person's pose, lighting, angle, and scale.\n{color_clause}\n"
+        f"Keep the person's face, hair, body, and clothes unchanged.\n"
+        f"Do not generate person, face, or body parts in the masked area.\n"
+        f"Focus on the {subject} and make it look like a natural part of the photo."
     )
 
 
@@ -376,7 +377,7 @@ print(f"  모드\t\t: {'검색' if use_retrieval else 'AI 생성'}")
 print(f"  스케치 모양\t: {sketch_shape}")
 print(f"  색상 힌트\t: {sketch_color_hint or '자동 추출 실패'}")
 print(f"  스타일\t: {selected_style['name']}")
-print(f"  프롬프트\t: {combined_prompt}")
+print(f"  프롬프트\t: ```\n{combined_prompt}\n```")
 print(f"  배경\t\t: {bg_label}")
 print(f"  출력\t\t: output/{output_filename}\n")
 

@@ -1,4 +1,5 @@
 mediapipe
-carvekit 
-pillow 
+carvekit
+pillow
 opencv-python
+python-dotenv

@@ -1,11 +1,14 @@
 import io
 import math
 import os
-import colorsys
-from collections import Counter
 from pathlib import Path
-from PIL import Image, ImageChops, ImageFilter
+from PIL import Image, ImageFilter
 from carvekit.api.high import HiInterface
+from prompt_utils import (
+    build_inpaint_prompt,
+    detect_sketch_color_weights,
+    format_color_weights_for_display,
+)
 from shape_classifier import classify as classify_shape
 
 # ──────────────────────────────────────────────────────────────
@@ -65,108 +68,6 @@ STYLES = {
     str(index): {"name": display_name, "preset": preset}
     for index, (preset, display_name) in enumerate(STYLE_PRESET_OPTIONS, start=1)
 }
-
-
-def build_inpaint_prompt(shape: str, subject_prompt: str, color_hint: str) -> str:
-    """shape 분류 결과와 스케치 색상을 바탕으로 인페인팅 프롬프트를 생성."""
-    subject = subject_prompt.strip() if subject_prompt else shape.replace("_", " ")
-    subject = subject.rstrip(".")
-    color_clause = ""
-    if color_hint:
-        color_clause = f"Use the original sketch colors, especially {color_hint}."
-    return (
-        f"Add {subject} naturally in the masked area.\n"
-        f"Match the person's pose, lighting, angle, and scale.\n{color_clause}\n"
-        f"Keep the person's face, hair, body, and clothes unchanged.\n"
-        f"Do not generate person, face, or body parts in the masked area.\n"
-        f"Focus on the {subject} and make it look like a natural part of the photo."
-    )
-
-
-def _rgb_to_color_name(rgb: tuple[int, int, int]) -> str:
-    """RGB 값을 사람이 읽기 쉬운 간단한 색상명으로 변환한다."""
-    red, green, blue = [channel / 255 for channel in rgb]
-    hue, saturation, value = colorsys.rgb_to_hsv(red, green, blue)
-    hue *= 360
-
-    if value < 0.16:
-        return "black"
-    if saturation < 0.12:
-        if value > 0.9:
-            return "white"
-        if value > 0.65:
-            return "light gray"
-        return "gray"
-
-    prefix = ""
-    if value > 0.82 and saturation < 0.45:
-        prefix = "light "
-    elif value < 0.4:
-        prefix = "dark "
-
-    if hue < 15 or hue >= 345:
-        base = "red"
-    elif hue < 40:
-        base = "orange"
-    elif hue < 70:
-        base = "yellow"
-    elif hue < 160:
-        base = "green"
-    elif hue < 200:
-        base = "cyan"
-    elif hue < 255:
-        base = "blue"
-    elif hue < 300:
-        base = "purple"
-    else:
-        base = "pink"
-
-    return f"{prefix}{base}".strip()
-
-
-def detect_sketch_color_hint(image_path: Path, mask_path: Path) -> str:
-    """원본 사진의 마스크 경계선 픽셀에서 스케치 색상을 추정한다."""
-    with Image.open(image_path) as image:
-        image = image.convert("RGB")
-    with Image.open(mask_path) as mask:
-        mask = mask.convert("L")
-        if mask.size != image.size:
-            mask = mask.resize(image.size, Image.NEAREST)
-
-    binary_mask = mask.point(lambda value: 255 if value > 127 else 0)
-    eroded_mask = binary_mask.filter(ImageFilter.MinFilter(size=3))
-    edge_mask = ImageChops.subtract(binary_mask, eroded_mask)
-
-    def collect_colors(region_mask: Image.Image) -> list[str]:
-        region_colors: list[tuple[int, int, int]] = []
-        for rgb, mask_value in zip(image.getdata(), region_mask.getdata()):
-            if mask_value == 0:
-                continue
-            red, green, blue = rgb
-            hue, saturation, value = colorsys.rgb_to_hsv(red / 255, green / 255, blue / 255)
-            if saturation < 0.18 or value < 0.18:
-                continue
-            quantized = tuple(min(255, (channel // 32) * 32 + 16) for channel in rgb)
-            region_colors.append(quantized)
-
-        if not region_colors:
-            return []
-
-        named_colors = Counter(_rgb_to_color_name(rgb) for rgb in region_colors)
-        ordered_names = [name for name, _count in named_colors.most_common(3)]
-        unique_names: list[str] = []
-        for name in ordered_names:
-            if name not in unique_names:
-                unique_names.append(name)
-        return unique_names[:2]
-
-    color_names = collect_colors(edge_mask)
-
-    if not color_names:
-        return ""
-    if len(color_names) == 1:
-        return color_names[0]
-    return f"{color_names[0]} and {color_names[1]}"
 
 
 def load_backgrounds() -> dict:
@@ -361,8 +262,9 @@ use_custom_bg = (bg_key != "0")
 
 # ── Shape 분류 → 프롬프트 ──
 sketch_shape, sketch_subject_prompt = step0_detect_sketch(mask_image_path)
-sketch_color_hint = detect_sketch_color_hint(input_image_path, mask_image_path)
-combined_prompt = build_inpaint_prompt(sketch_shape, sketch_subject_prompt, sketch_color_hint)
+sketch_color_weights = detect_sketch_color_weights(input_image_path, mask_image_path)
+sketch_color_hint = format_color_weights_for_display(sketch_color_weights)
+combined_prompt = build_inpaint_prompt(sketch_shape, sketch_subject_prompt, sketch_color_weights)
 print(combined_prompt)
 
 bg_label          = selected_bg["name"]

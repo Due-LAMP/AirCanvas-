@@ -3,7 +3,6 @@ import os
 import cv2
 import numpy as np
 import tempfile
-import threading
 import config
 import assets
 
@@ -41,18 +40,15 @@ except Exception as _e:
     _BG_REMOVER_AVAILABLE = False
 
 _bg_remover_instance = None
-_bg_remover_lock = threading.Lock()
 
 
 def get_bg_remover():
     global _bg_remover_instance
     if _bg_remover_instance is None and _BG_REMOVER_AVAILABLE:
-        with _bg_remover_lock:
-            if _bg_remover_instance is None:
-                _bg_remover_instance = _HiInterface(
-                    object_type='object', batch_size_seg=1, batch_size_matting=1,
-                    device='cpu', seg_mask_size=640, matting_mask_size=2048,
-                )
+        _bg_remover_instance = _HiInterface(
+            object_type='object', batch_size_seg=1, batch_size_matting=1,
+            device='cpu', seg_mask_size=640, matting_mask_size=2048,
+        )
     return _bg_remover_instance
 
 
@@ -164,24 +160,7 @@ def remove_bg_composite(img_bgr, bg_bgr):
     return cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
 
-def process_shot_inpaint(photo_clean, drawn_photo, mask, theme_name, result_bucket, index):
-    """배경 교체 없는 경우 촬영 직후 인페인팅만 백그라운드로 처리.
-    carvekit(CPU-heavy)은 포함하지 않으므로 촬영 중 프레임 드랍이 없음."""
-    print(f'[AI] {index+1}번 인페인팅 시작 (네트워크)...', flush=True)
-    try:
-        style_preset = theme_name if theme_name else 'pixel-art'
-        has_drawing  = (cv2.countNonZero(mask) > 0)
-        out = pixelart_inpaint_one(photo_clean, mask, reference_bgr=drawn_photo,
-                                   style_preset=style_preset) if has_drawing else photo_clean.copy()
-        result_bucket[index] = out
-        print(f'[AI] {index+1}번 인페인팅 완료', flush=True)
-    except Exception as e:
-        result_bucket[index] = photo_clean
-        print(f'[AI] {index+1}번 인페인팅 오류 (원본 사용): {e}', flush=True)
-
-
-def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_name, bg_img,
-                  preprocess_bucket=None, preprocess_threads=None):
+def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_name, bg_img):
     try:
         if not config.STABILITY_API_KEY:
             raise ValueError('STABILITY_API_KEY 환경변수가 설정되지 않았습니다.')
@@ -189,25 +168,16 @@ def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_
         style_preset = theme_name if theme_name else 'pixel-art'
         print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}', flush=True)
 
-        # 인페인팅 사전처리 스레드가 아직 실행 중이면 완료 대기
-        if preprocess_threads:
-            for t in preprocess_threads:
-                t.join()
-
         ai_photos = []
         for i, (clean, drawn, mask) in enumerate(zip(clean_photos[:4], drawn_photos[:4], masks[:4])):
-            if bg_img is None and preprocess_bucket and i in preprocess_bucket:
-                # 배경 없음: 인페인팅 사전처리 결과 사용
-                ai_photos.append(preprocess_bucket[i])
-            else:
-                # 배경 있음: carvekit(마지막에) → 인페인팅 순서로 처리
-                print(f'[AI] 사진 {i+1}/4 처리 중 (carvekit + 인페인팅)...', flush=True)
-                base = clean.copy()
-                if bg_img is not None:
-                    base = remove_bg_composite(clean, bg_img)
-                has_drawing = (cv2.countNonZero(mask) > 0)
-                ai_photos.append(pixelart_inpaint_one(base, mask, reference_bgr=drawn,
-                                                      style_preset=style_preset) if has_drawing else base)
+            print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
+            has_drawing = (cv2.countNonZero(mask) > 0)
+            base = pixelart_inpaint_one(clean, mask, reference_bgr=drawn,
+                                        style_preset=style_preset) if has_drawing else clean.copy()
+            if bg_img is not None:
+                print(f'[AI] 사진 {i+1}/4 배경 교체 중 (carvekit)...', flush=True)
+                base = remove_bg_composite(base, bg_img)
+            ai_photos.append(base)
 
         if assets.frame_raw is not None:
             fh, fw = assets.frame_raw.shape[:2]

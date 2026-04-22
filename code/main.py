@@ -131,10 +131,7 @@ def run():
     review_start   = None
     result_collage = None
     ai_collage     = None
-    ai_bucket          = {}
-    ai_thread_main     = None
-    preprocess_bucket  = {}
-    preprocess_threads = []
+    ai_bucket      = {}
     qr_img         = None
     session_dir    = None
     photos_clean   = []
@@ -374,10 +371,7 @@ def run():
                     draw_masks     = []
                     result_collage = None
                     ai_collage     = None
-                    ai_bucket          = {}
-                    ai_thread_main     = None
-                    preprocess_bucket  = {}
-                    preprocess_threads = []
+                    ai_bucket      = {}
                     qr_img         = None
                     review_start   = None
                     saver.email_status = None
@@ -418,18 +412,6 @@ def run():
                     flash_start = now
                     print(f"[{len(photos)}/{config.TOTAL_SHOTS}] 촬영!")
 
-                    # 배경 없을 때만 촬영 직후 인페인팅 시작 (네트워크 I/O, CPU 부담 없음)
-                    # 배경 있을 때는 carvekit(CPU-heavy)이 필요해서 마지막에 처리
-                    if ai_processor.INPAINTING_AVAILABLE and selected_bg_img is None:
-                        t = threading.Thread(
-                            target=ai_processor.process_shot_inpaint,
-                            args=(frame_clean.copy(), shot.copy(), msk.copy(),
-                                  selected_theme_name, preprocess_bucket, shot_index),
-                            daemon=True,
-                        )
-                        t.start()
-                        preprocess_threads.append(t)
-
                     if len(photos) >= config.TOTAL_SHOTS:
                         session_dir = os.path.join(config.SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
                         saver.save_final(photos, session_dir, masks=draw_masks)
@@ -440,18 +422,13 @@ def run():
                         saver.email_status = None
                         print(f"[QR] {qr_url}")
                         if ai_processor.INPAINTING_AVAILABLE:
-                            ai_bucket = {}
+                            ai_bucket  = {}
                             ai_collage = None
-                            ai_thread_main = threading.Thread(
-                                target=ai_processor.build_ai_4cut,
-                                args=(list(photos_clean), list(photos), list(draw_masks), session_dir,
-                                      ai_bucket, selected_theme_name, selected_bg_img),
-                                kwargs={'preprocess_bucket': preprocess_bucket,
-                                        'preprocess_threads': list(preprocess_threads)},
-                                daemon=True,
-                            )
-                            ai_thread_main.start()
                             print(f'[AI] 생성 시작... 테마={selected_theme_name}, 배경={"있음" if selected_bg_img is not None else "없음"}')
+                            ai_processor.build_ai_4cut(
+                                list(photos_clean), list(photos), list(draw_masks), session_dir,
+                                ai_bucket, selected_theme_name, selected_bg_img,
+                            )
 
             elif state == config.STATE_FLASH:
                 if now - flash_start >= config.FLASH_SEC:
@@ -460,7 +437,7 @@ def run():
                             _writer_to_release = out_writer
                             out_writer = None
                             print("[녹화 종료]")
-                            threading.Thread(target=saver.release_and_save, args=(_writer_to_release,), daemon=True).start()
+                            saver.release_and_save(_writer_to_release)
                         state        = config.STATE_REVIEW
                         review_start = now
                     else:
@@ -653,17 +630,6 @@ def run():
                         cv2.putText(canvas, "REPLAY", (config.CAM_X + 10, config.CAM_Y + 24),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.WHITE, 1, cv2.LINE_AA)
 
-                if ai_thread_main is not None and ai_thread_main.is_alive():
-                    if int(time.time() * 2) % 2 == 0:
-                        dots     = "." * (int(time.time() * 1.5) % 4)
-                        gen_text = f"GENERATING{dots}"
-                        (gw, _), _ = cv2.getTextSize(gen_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 3)
-                        gx = config.CAM_X + (config.CAM_W - gw) // 2
-                        gy = config.CAM_Y + config.CAM_H - 18
-                        cv2.putText(canvas, gen_text, (gx, gy),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.BLACK, 3, cv2.LINE_AA)
-                        cv2.putText(canvas, gen_text, (gx, gy),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.WHITE, 1, cv2.LINE_AA)
 
             else:
                 ui.render_frame(canvas, photos)

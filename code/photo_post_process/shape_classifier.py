@@ -353,3 +353,147 @@ def _count_significant_defects(contour, threshold: float = 8) -> int:
     if defects is None:
         return 0
     return sum(1 for d in defects if d[0][3] / 256 > threshold)
+
+
+# ──────────────────────────────────────────────────────────────
+# 디스크 I/O 없이 numpy array 에서 직접 분류 (고속 경로)
+# ──────────────────────────────────────────────────────────────
+
+def _classify_ear_accessory_from_array(img: np.ndarray) -> str | None:
+    """_classify_ear_accessory 의 array 버전."""
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    height, width = binary.shape
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours = [c for c in contours if cv2.contourArea(c) >= 150]
+    if len(contours) != 2:
+        return None
+    contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
+    features = []
+    for contour in contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        area = cv2.contourArea(contour)
+        rect_area = max(1, w * h)
+        fill_ratio = area / rect_area
+        epsilon = 0.04 * cv2.arcLength(contour, True)
+        vertices = len(cv2.approxPolyDP(contour, epsilon, True))
+        features.append({"x": x, "y": y, "w": w, "h": h, "area": area,
+                          "aspect": w / h if h > 0 else 999,
+                          "fill_ratio": fill_ratio, "vertices": vertices})
+    left, right = features
+    gap = right["x"] - (left["x"] + left["w"])
+    avg_height = (left["h"] + right["h"]) / 2
+    avg_width  = (left["w"] + right["w"]) / 2
+    avg_aspect = (left["aspect"] + right["aspect"]) / 2
+    avg_fill   = (left["fill_ratio"] + right["fill_ratio"]) / 2
+    avg_vertices = (left["vertices"] + right["vertices"]) / 2
+    if gap < -10 or gap > avg_height * 0.9: return None
+    if left["y"] > height * 0.35 or right["y"] > height * 0.35: return None
+    if left["h"] < height * 0.18 or right["h"] < height * 0.18: return None
+    if abs(left["h"] - right["h"]) / max(left["h"], right["h"]) > 0.35: return None
+    if abs(left["area"] - right["area"]) / max(left["area"], right["area"]) > 0.45: return None
+    if left["aspect"] > 1.0 or right["aspect"] > 1.0: return None
+    if avg_aspect < 0.68 and avg_height / max(avg_width, 1) > 1.6 and avg_vertices >= 5:
+        return "rabbit_ears"
+    if avg_aspect < 0.95 and avg_fill < 0.62:
+        return "cat_ears"
+    return None
+
+
+def _classify_with_opencv_from_array(img: np.ndarray) -> str:
+    """_classify_with_opencv 의 array 버전."""
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return "unknown"
+    contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter == 0 or area < 100:
+        return "unknown"
+    circularity = 4 * math.pi * area / (perimeter ** 2)
+    hull = cv2.convexHull(contour)
+    hull_area = cv2.contourArea(hull)
+    solidity = area / hull_area if hull_area > 0 else 0
+    epsilon = 0.04 * perimeter
+    approx = cv2.approxPolyDP(contour, epsilon, True)
+    vertices = len(approx)
+    num_defects = _count_significant_defects(contour, threshold=8)
+    x, y, w, h = cv2.boundingRect(contour)
+    aspect_ratio = w / h if h > 0 else 1.0
+    if circularity > 0.82: return "circle"
+    if vertices == 3: return "triangle"
+    if vertices == 4: return "square" if 0.85 <= aspect_ratio <= 1.15 else "rectangle"
+    if num_defects >= 4 and solidity < 0.65: return "star"
+    if num_defects in (1, 2) and 0.55 < solidity < 0.90 and aspect_ratio < 1.2: return "heart"
+    if vertices in (5, 6, 7) and (aspect_ratio > 1.6 or aspect_ratio < 0.6): return "arrow"
+    if vertices >= 5 and circularity > 0.65: return "circle"
+    return "unknown"
+
+
+def _classify_with_clip_from_array(img: np.ndarray) -> tuple[str, float]:
+    """_classify_with_clip 의 array 버전 — PIL.Image.fromarray 로 파일 I/O 생략."""
+    import torch
+    from PIL import Image
+    model, processor = _load_clip()
+    img_rgb = Image.fromarray(img).convert("RGB")
+    labels = list(_CLIP_CANDIDATES.keys())
+    texts  = list(_CLIP_CANDIDATES.values())
+    inputs = processor(text=texts, images=img_rgb, return_tensors="pt", padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        probs   = outputs.logits_per_image.softmax(dim=1)[0]
+    best_idx   = probs.argmax().item()
+    best_label = labels[best_idx]
+    best_prob  = probs[best_idx].item()
+    top3 = sorted(zip(labels, probs.tolist()), key=lambda x: -x[1])[:3]
+    print(f"  CLIP Top-3: " + ", ".join(f"{l}({p:.2f})" for l, p in top3))
+    if best_prob < 0.25:
+        print(f"  신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
+        return _classify_with_opencv_from_array(img), best_prob
+    return best_label, best_prob
+
+
+def classify_from_array(mask_gray: np.ndarray) -> tuple[str, str, float | None]:
+    """
+    numpy array(그레이스케일)에서 직접 shape을 분류한다. 디스크 I/O 없음.
+
+    Returns:
+        (shape_name, inpaint_prompt, clip_top1_confidence)
+    """
+    ear_shape = _classify_ear_accessory_from_array(mask_gray)
+    if ear_shape is not None:
+        print(f"  귀 액세서리 규칙 기반 분류: {ear_shape}")
+        prompt = SHAPE_TO_PROMPT.get(ear_shape, SHAPE_TO_PROMPT["unknown"])
+        return ear_shape, prompt, 1.0
+
+    try:
+        import transformers  # noqa: F401
+        print("  CLIP zero-shot으로 분류 시도...")
+        shape, confidence = _classify_with_clip_from_array(mask_gray)
+    except ImportError:
+        if MODEL_PATH.exists():
+            # YOLO 는 파일 경로가 필요 → 임시 파일 최소 사용
+            import tempfile
+            print("  YOLO 모델로 분류 시도...")
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tf:
+                tmp_path = tf.name
+            try:
+                cv2.imwrite(tmp_path, mask_gray)
+                shape = _classify_with_yolo(Path(tmp_path))
+            finally:
+                try:
+                    import os as _os
+                    _os.unlink(tmp_path)
+                except Exception:
+                    pass
+        else:
+            print("  OpenCV 컨투어 분석으로 분류 시도...")
+            shape = _classify_with_opencv_from_array(mask_gray)
+        confidence = None
+
+    prompt = SHAPE_TO_PROMPT.get(shape, SHAPE_TO_PROMPT["unknown"])
+    return shape, prompt, confidence

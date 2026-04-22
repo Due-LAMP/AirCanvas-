@@ -2,7 +2,6 @@ import sys
 import os
 import cv2
 import numpy as np
-import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
@@ -11,7 +10,7 @@ import assets
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photo_post_process'))
 
 try:
-    from shape_classifier import classify as _classify_shape
+    from shape_classifier import classify_from_array as _classify_shape_from_array
     SHAPE_CLASSIFIER_AVAILABLE = True
 except Exception as _e:
     print(f'[경고] shape_classifier 로드 실패: {_e}', flush=True)
@@ -83,7 +82,7 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
 
     img_rgb  = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     buf_img  = _io.BytesIO()
-    _PILImage.fromarray(img_rgb).save(buf_img, format='PNG')
+    _PILImage.fromarray(img_rgb).save(buf_img, format='JPEG', quality=92)
     image_bytes = buf_img.getvalue()
 
     buf_mask = _io.BytesIO()
@@ -94,16 +93,7 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
     subject_prompt = 'a decorative accessory'
 
     if SHAPE_CLASSIFIER_AVAILABLE:
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tf:
-            tmp_path = tf.name
-        try:
-            cv2.imwrite(tmp_path, mask_gray)
-            shape_name, subject_prompt, _conf = _classify_shape(tmp_path)
-        finally:
-            try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+        shape_name, subject_prompt, _conf = _classify_shape_from_array(mask_gray)
 
     if _PROMPT_UTILS_AVAILABLE:
         color_weights = []
@@ -183,6 +173,12 @@ def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_
         print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}', flush=True)
 
         n = min(4, len(clean_photos), len(drawn_photos), len(masks))
+
+        # bg_img 는 모든 사진에 동일하게 사용 → 1회만 리사이즈
+        if bg_img is not None and n > 0:
+            ref_h, ref_w = clean_photos[0].shape[:2]
+            bg_img = cv2.resize(bg_img, (ref_w, ref_h))
+
         task_args = [
             (i, clean_photos[i], drawn_photos[i], masks[i], bg_img, style_preset)
             for i in range(n)

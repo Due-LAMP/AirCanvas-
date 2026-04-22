@@ -3,6 +3,10 @@ import requests
 
 api_key = os.getenv("STABILITY_API_KEY")
 
+# 커넥션 풀 재사용 (TCP 핸드셰이크 비용 절감)
+_session = requests.Session()
+_session.headers.update({"authorization": f"Bearer {api_key}", "accept": "image/*"})
+
 
 def step1_inpaint(
     image_bytes: bytes,
@@ -35,12 +39,14 @@ def step1_inpaint(
         # "mask_bytes": len(mask_bytes),
     }
 
-    resp = requests.post(
+    # image는 JPEG(작고 빠름), mask는 PNG(이진 정밀도 유지)
+    img_mime = "image/jpeg" if image_bytes[:3] == b'\xff\xd8\xff' else "image/png"
+    img_name = "input.jpg" if img_mime == "image/jpeg" else "input.png"
+    resp = _session.post(
         "https://api.stability.ai/v2beta/stable-image/edit/inpaint",
-        headers={"authorization": f"Bearer {api_key}", "accept": "image/*"},
         files={
-            "image": ("input.png", image_bytes, "image/png"),
-            "mask":  ("mask.png",  mask_bytes,  "image/png"),
+            "image": (img_name, image_bytes, img_mime),
+            "mask":  ("mask.png", mask_bytes, "image/png"),
         },
         data=data,
     )

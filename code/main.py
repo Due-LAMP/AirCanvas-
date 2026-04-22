@@ -464,21 +464,30 @@ def run():
 
                     if len(photos) >= config.TOTAL_SHOTS:
                         session_dir = os.path.join(config.SAVE_DIR, datetime.now().strftime("%Y%m%d_%H%M%S"))
-                        saver.save_final(photos, session_dir, masks=draw_masks)
-                        result_collage = cv2.imread(os.path.join(session_dir, "4cut.jpg"))
-                        session_name   = os.path.basename(session_dir)
-                        qr_url         = f"http://{saver.LOCAL_IP}:{config.HTTP_PORT}/{session_name}/4cut.jpg"
-                        qr_img         = saver.make_qr_cv(qr_url)
+
+                        def _save_and_start_ai(_photos, _session_dir, _masks,
+                                               _theme, _bg, _bucket_ref):
+                            saver.save_final(_photos, _session_dir, masks=_masks)
+                            _rc = cv2.imread(os.path.join(_session_dir, "4cut.jpg"))
+                            _bucket_ref['result_collage'] = _rc
+                            _sn  = os.path.basename(_session_dir)
+                            _url = f"http://{saver.LOCAL_IP}:{config.HTTP_PORT}/{_sn}/4cut.jpg"
+                            _bucket_ref['qr_url'] = _url
+                            if ai_processor.INPAINTING_AVAILABLE:
+                                ai_processor.build_ai_4cut(
+                                    list(_photos), list(_photos), list(_masks),
+                                    _session_dir, _bucket_ref, _theme, _bg,
+                                )
+
+                        ai_bucket  = {}
+                        ai_collage = None
                         saver.email_status = None
-                        print(f"[QR] {qr_url}")
-                        if ai_processor.INPAINTING_AVAILABLE:
-                            ai_bucket  = {}
-                            ai_collage = None
-                            print(f'[AI] 생성 시작... 테마={selected_theme_name}, 배경={"있음" if selected_bg_img is not None else "없음"}')
-                            ai_processor.build_ai_4cut(
-                                list(photos_clean), list(photos), list(draw_masks), session_dir,
-                                ai_bucket, selected_theme_name, selected_bg_img,
-                            )
+                        threading.Thread(
+                            target=_save_and_start_ai,
+                            args=(list(photos), session_dir, list(draw_masks),
+                                  selected_theme_name, selected_bg_img, ai_bucket),
+                            daemon=True,
+                        ).start()
 
             elif state == config.STATE_FLASH:
                 if now - flash_start >= config.FLASH_SEC:
@@ -496,6 +505,13 @@ def run():
             elif state == config.STATE_REVIEW:
                 if review_cap is None and os.path.exists(config.VID_PLAY):
                     review_cap = cv2.VideoCapture(config.VID_PLAY)
+                # 저장 완료 시 result_collage / qr 갱신
+                if result_collage is None and ai_bucket.get('result_collage') is not None:
+                    result_collage = ai_bucket['result_collage']
+                    _qr_url = ai_bucket.get('qr_url', '')
+                    if _qr_url:
+                        qr_img = saver.make_qr_cv(_qr_url)
+                        print(f"[QR] {_qr_url}")
                 ai_done = ai_bucket.get('img') is not None or ai_bucket.get('error') is not None
                 if ai_done:
                     state = config.STATE_RESULT

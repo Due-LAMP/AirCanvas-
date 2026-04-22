@@ -34,7 +34,6 @@ def step1_inpaint(
         # "image_bytes": len(image_bytes),
         # "mask_bytes": len(mask_bytes),
     }
-    print(f"[Step 1] Stability metadata: {request_metadata}")
 
     resp = requests.post(
         "https://api.stability.ai/v2beta/stable-image/edit/inpaint",

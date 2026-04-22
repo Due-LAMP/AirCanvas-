@@ -33,23 +33,20 @@ except Exception as _e:
     _PROMPT_UTILS_AVAILABLE = False
 
 try:
-    from carvekit.api.high import HiInterface as _HiInterface
-    _BG_REMOVER_AVAILABLE = True
+    import mediapipe as _mp_module
+    _SELFIE_SEG_AVAILABLE = True
 except Exception as _e:
-    print(f'[경고] carvekit 로드 실패 (배경 교체 비활성화): {_e}', flush=True)
-    _BG_REMOVER_AVAILABLE = False
+    print(f'[경고] mediapipe 로드 실패: {_e}', flush=True)
+    _SELFIE_SEG_AVAILABLE = False
 
-_bg_remover_instance = None
+_selfie_seg_instance = None
 
 
-def get_bg_remover():
-    global _bg_remover_instance
-    if _bg_remover_instance is None and _BG_REMOVER_AVAILABLE:
-        _bg_remover_instance = _HiInterface(
-            object_type='object', batch_size_seg=1, batch_size_matting=1,
-            device='cpu', seg_mask_size=640, matting_mask_size=2048,
-        )
-    return _bg_remover_instance
+def _get_selfie_seg():
+    global _selfie_seg_instance
+    if _selfie_seg_instance is None and _SELFIE_SEG_AVAILABLE:
+        _selfie_seg_instance = _mp_module.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    return _selfie_seg_instance
 
 
 def fill_mask_interior(mask_bin):
@@ -133,31 +130,27 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
 
 
 def remove_bg_composite(img_bgr, bg_bgr):
-    import io as _io
-    from PIL import Image as _PILImage, ImageFilter as _ImageFilter
-
-    remover = get_bg_remover()
-    if remover is None:
-        print('[배경] carvekit 없음 → 배경 교체 스킵', flush=True)
+    seg = _get_selfie_seg()
+    if seg is None:
+        print('[배경] MediaPipe 없음 → 배경 교체 스킵', flush=True)
         return img_bgr
 
     h, w = img_bgr.shape[:2]
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    pil_img = _PILImage.fromarray(img_rgb)
 
-    print('[배경] 인물 배경 제거 중 (carvekit)...', flush=True)
-    rgba = remover([pil_img])[0]
+    print('[배경] 인물 배경 제거 중 (MediaPipe)...', flush=True)
+    result = seg.process(img_rgb)
+    mask = (result.segmentation_mask > 0.6).astype(np.uint8) * 255
 
-    r, g, b, alpha = rgba.split()
-    alpha = alpha.filter(_ImageFilter.GaussianBlur(radius=2))
-    rgba = _PILImage.merge('RGBA', (r, g, b, alpha))
+    # 가장자리 페더링
+    mask = cv2.GaussianBlur(mask, (21, 21), 0)
+    mask_3 = mask[:, :, np.newaxis].astype(np.float32) / 255.0
 
-    bg_rgb = cv2.cvtColor(cv2.resize(bg_bgr, (w, h)), cv2.COLOR_BGR2RGB)
-    bg_pil = _PILImage.fromarray(bg_rgb).convert('RGBA')
-
-    bg_pil.paste(rgba, (0, 0), mask=rgba)
-    result = np.array(bg_pil.convert('RGB'))
-    return cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
+    bg = cv2.resize(bg_bgr, (w, h)).astype(np.float32)
+    fg = img_bgr.astype(np.float32)
+    composite = (fg * mask_3 + bg * (1.0 - mask_3)).astype(np.uint8)
+    print('  완료.', flush=True)
+    return composite
 
 
 def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_name, bg_img):
@@ -170,13 +163,18 @@ def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_
 
         ai_photos = []
         for i, (clean, drawn, mask) in enumerate(zip(clean_photos[:4], drawn_photos[:4], masks[:4])):
-            print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
-            has_drawing = (cv2.countNonZero(mask) > 0)
-            base = pixelart_inpaint_one(clean, mask, reference_bgr=drawn,
-                                        style_preset=style_preset) if has_drawing else clean.copy()
+            # Step 1: 배경 합성 먼저 (MediaPipe segmentation)
             if bg_img is not None:
-                print(f'[AI] 사진 {i+1}/4 배경 교체 중 (carvekit)...', flush=True)
-                base = remove_bg_composite(base, bg_img)
+                print(f'[AI] 사진 {i+1}/4 배경 교체 중 (MediaPipe)...', flush=True)
+                base = remove_bg_composite(clean, bg_img)
+            else:
+                base = clean.copy()
+            # Step 2: 합성된 이미지에 inpainting (CLIP 색추출 + SD API)
+            has_drawing = (cv2.countNonZero(mask) > 0)
+            if has_drawing:
+                print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
+                base = pixelart_inpaint_one(base, mask, reference_bgr=drawn,
+                                            style_preset=style_preset)
             ai_photos.append(base)
 
         if assets.frame_raw is not None:

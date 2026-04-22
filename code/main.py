@@ -1,5 +1,6 @@
 import sys
 import os
+import argparse
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -116,7 +117,7 @@ def _init_camera():
     return None
 
 
-def run():
+def run(screen_record: bool = False):
     video = _init_camera()
     if video is None:
         print("[오류] 카메라를 찾을 수 없습니다.")
@@ -177,6 +178,7 @@ def run():
     bg_hovered_cell     = -1
 
     out_writer     = None
+    screen_writer  = None
     review_cap     = None
     review_start   = None
     result_collage = None
@@ -746,6 +748,15 @@ def run():
                 cv2.putText(canvas, "Enter: Send   ESC: Cancel", (bx + 16, by + 105),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, config.GRAY, 1, cv2.LINE_AA)
 
+            if screen_record:
+                if screen_writer is None:
+                    sh, sw = canvas.shape[:2]
+                    screen_writer = cv2.VideoWriter(
+                        os.path.join(config.SAVE_DIR, 'screen_recording.mp4'),
+                        cv2.VideoWriter_fourcc(*'mp4v'), 30, (sw, sh),
+                    )
+                screen_writer.write(canvas)
+
             cv2.imshow('PhotoBooth', canvas)
             key = cv2.waitKeyEx(1)
 
@@ -776,10 +787,16 @@ def run():
         out_writer.release()
     if review_cap:
         review_cap.release()
+    if screen_writer:
+        screen_writer.release()
+        print(f"[녹화] 저장 완료 → {os.path.join(config.SAVE_DIR, 'screen_recording.mp4')}")
     if video:
         video.release()
     cv2.destroyAllWindows()
     print("종료.")
 
 if __name__ == '__main__':
-    run()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--screen-record', action='store_true', help='화면 전체를 screen_recording.mp4로 저장')
+    args = parser.parse_args()
+    run(screen_record=args.screen_record)

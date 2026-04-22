@@ -34,94 +34,94 @@ def _map_color_name_for_prompt(name: str) -> str:
     return PROMPT_COLOR_NAME_MAP.get(name, name)
 
 
-def _describe_color_emphasis(color_weights: ColorWeights) -> str:
-    """가중치 목록을 모델이 해석하기 쉬운 자연어 색상 설명으로 바꾼다."""
-    if not color_weights:
-        return ""
+# def _describe_color_emphasis(color_weights: ColorWeights) -> str:
+#     """가중치 목록을 모델이 해석하기 쉬운 자연어 색상 설명으로 바꾼다."""
+#     if not color_weights:
+#         return ""
 
-    descriptions: list[str] = []
-    for index, (name, weight) in enumerate(color_weights):
-        prompt_name = _map_color_name_for_prompt(name)
-        if index == 0 or weight >= 0.75:
-            qualifier = "primarily"
-        elif weight >= 0.4:
-            qualifier = "mostly"
-        elif weight >= 0.2:
-            qualifier = "with secondary"
-        else:
-            qualifier = "with small"
+#     descriptions: list[str] = []
+#     for index, (name, weight) in enumerate(color_weights):
+#         prompt_name = _map_color_name_for_prompt(name)
+#         if index == 0 or weight >= 0.75:
+#             qualifier = "primarily"
+#         elif weight >= 0.4:
+#             qualifier = "mostly"
+#         elif weight >= 0.2:
+#             qualifier = "with secondary"
+#         else:
+#             qualifier = "with small"
 
-        if qualifier in {"primarily", "mostly"}:
-            descriptions.append(f"{qualifier} {prompt_name}")
-        elif qualifier == "with secondary":
-            descriptions.append(f"secondary {prompt_name} accents")
-        else:
-            descriptions.append(f"small {prompt_name} details")
+#         if qualifier in {"primarily", "mostly"}:
+#             descriptions.append(f"{qualifier} {prompt_name}")
+#         elif qualifier == "with secondary":
+#             descriptions.append(f"secondary {prompt_name} accents")
+#         else:
+#             descriptions.append(f"small {prompt_name} details")
 
-    return ", ".join(descriptions)
+#     return ", ".join(descriptions)
 
 
-def _build_shape_guidance(shape: str, subject: str) -> str:
-    """모양별 추가 제약을 반환한다."""
-    if shape == "rabbit_ears":
-        return (
-            "Create exactly one clean pair of bunny ears as a headband accessory above the head. "
-            "Make the two ears upright, symmetrical, and clearly readable. Do not create extra ears or a new character."
-        )
-    if shape == "cat_ears":
-        return (
-            "Create exactly one clean pair of cat ears as a headband accessory above the head. "
-            "Make the ears pointed, symmetrical, and clearly readable. Do not create extra ears or a new character."
-        )
-    if shape == "sunglasses":
-        return (
-            "Create exactly one clean pair of sunglasses worn naturally on the face. "
-            "Keep them symmetrical, readable, and properly aligned without changing the face."
-        )
-    if shape == "crown":
-        return (
-            "Create exactly one clean crown accessory placed naturally on top of the head. "
-            "Keep it centered, symmetrical, and clearly readable without creating a new character."
-        )
-    if shape == "hat":
-        return (
-            "Create exactly one clean hat accessory worn naturally on the head. "
-            "Keep the silhouette simple, stable, and clearly readable without changing the person."
-        )
-    if shape == "bow":
-        return (
-            "Create exactly one clean ribbon bow accessory with two balanced loops and a clear center knot. "
-            "Keep it symmetrical and neatly attached to the person."
-        )
-    if shape == "mustache":
-        return (
-            "Create exactly one clean mustache with two balanced sides and a readable center split. "
-            "Keep it neat, symmetrical, and attached naturally without changing the face shape."
-        )
-    if shape == "whiskers":
-        return (
-            "Create clean cat whiskers as a simple facial accessory with thin balanced lines on both sides. "
-            "Do not create fur, a cat face, or a new character."
-        )
-    if shape in ACCESSORY_SHAPES:
-        return (
-            f"Create {subject} as a wearable accessory placed naturally on the person. "
-            "Keep the shape clean and do not create extra accessories or a new character."
-        )
-    if shape in ICON_SHAPES:
-        return (
-            f"Create only one clean {subject} with a simple, readable, well-defined silhouette inside the masked area. "
-            "Do not distort the shape and do not add extra decorative objects or characters."
-        )
-    if shape in NATURE_SHAPES:
-        return (
-            f"Create one clean {subject} with a clear silhouette and natural proportions inside the masked area. "
-            "Keep the shape readable and do not add unrelated objects or characters."
-        )
-    return (
-        f"Create only {subject} inside the masked area with a clean, readable silhouette. "
-        "Do not add unrelated objects or characters."
-    )
+# def _build_shape_guidance(shape: str, subject: str) -> str:
+#     """모양별 추가 제약을 반환한다."""
+#     if shape == "rabbit_ears":
+#         return (
+#             "Create exactly one clean pair of bunny ears as a headband accessory above the head. "
+#             "Make the two ears upright, symmetrical, and clearly readable. Do not create extra ears or a new character."
+#         )
+#     if shape == "cat_ears":
+#         return (
+#             "Create exactly one clean pair of cat ears as a headband accessory above the head. "
+#             "Make the ears pointed, symmetrical, and clearly readable. Do not create extra ears or a new character."
+#         )
+#     if shape == "sunglasses":
+#         return (
+#             "Create exactly one clean pair of sunglasses worn naturally on the face. "
+#             "Keep them symmetrical, readable, and properly aligned without changing the face."
+#         )
+#     if shape == "crown":
+#         return (
+#             "Create exactly one clean crown accessory placed naturally on top of the head. "
+#             "Keep it centered, symmetrical, and clearly readable without creating a new character."
+#         )
+#     if shape == "hat":
+#         return (
+#             "Create exactly one clean hat accessory worn naturally on the head. "
+#             "Keep the silhouette simple, stable, and clearly readable without changing the person."
+#         )
+#     if shape == "bow":
+#         return (
+#             "Create exactly one clean ribbon bow accessory with two balanced loops and a clear center knot. "
+#             "Keep it symmetrical and neatly attached to the person."
+#         )
+#     if shape == "mustache":
+#         return (
+#             "Create exactly one clean mustache with two balanced sides and a readable center split. "
+#             "Keep it neat, symmetrical, and attached naturally without changing the face shape."
+#         )
+#     if shape == "whiskers":
+#         return (
+#             "Create clean cat whiskers as a simple facial accessory with thin balanced lines on both sides. "
+#             "Do not create fur, a cat face, or a new character."
+#         )
+#     if shape in ACCESSORY_SHAPES:
+#         return (
+#             f"Create {subject} as a wearable accessory placed naturally on the person. "
+#             "Keep the shape clean and do not create extra accessories or a new character."
+#         )
+#     if shape in ICON_SHAPES:
+#         return (
+#             f"Create only one clean {subject} with a simple, readable, well-defined silhouette inside the masked area. "
+#             "Do not distort the shape and do not add extra decorative objects or characters."
+#         )
+#     if shape in NATURE_SHAPES:
+#         return (
+#             f"Create one clean {subject} with a clear silhouette and natural proportions inside the masked area. "
+#             "Keep the shape readable and do not add unrelated objects or characters."
+#         )
+#     return (
+#         f"Create only {subject} inside the masked area with a clean, readable silhouette. "
+#         "Do not add unrelated objects or characters."
+#     )
 
 
 def build_inpaint_prompt(shape: str, subject_prompt: str, color_weights: ColorWeights) -> str:
@@ -130,7 +130,7 @@ def build_inpaint_prompt(shape: str, subject_prompt: str, color_weights: ColorWe
     subject = subject.rstrip(".")
     color_clause = ""
     if color_weights:
-        color_emphasis = _describe_color_emphasis(color_weights)
+        # color_emphasis = _describe_color_emphasis(color_weights)
         # color_clause = (
         #     "Use the original sketch colors, "
         #     f"{color_emphasis}. Weighted color hint: {format_color_weights_for_prompt(color_weights)}."
@@ -140,7 +140,7 @@ def build_inpaint_prompt(shape: str, subject_prompt: str, color_weights: ColorWe
         )
     # shape_guidance = _build_shape_guidance(shape, subject)
     return (
-        f"Add {color_clause} {subject} naturally in the masked area.\n"
+        f"Add a {color_clause} {subject} naturally in the masked area.\n"
         # f"Match the photo's lighting, angle, and scale.\n{shape_guidance}\n{color_clause}\n"
         f"Match the photo's lighting, angle, and scale.\n"
         f"Keep the person's face, hair, body, and clothes unchanged.\n"

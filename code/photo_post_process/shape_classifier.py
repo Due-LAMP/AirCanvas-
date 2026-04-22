@@ -21,32 +21,34 @@ MODEL_PATH = Path(__file__).parent / "models" / "sketch_classifier.pt"
 # ──────────────────────────────────────────────────────────────
 SHAPE_TO_PROMPT: dict[str, str] = {
     # ── 자연/날씨 ──
-    "heart":        "a heart",
-    "star":         "a five-pointed star",
-    "cloud":        "a cloud",
-    "moon":         "a crescent moon",
-    "rainbow":      "a rainbow arc",
-    "lightning":    "a lightning bolt",
-    "fire":         "a flame fire",
-    "flower":       "a daisy flower",
-    "leaf":         "a leaf",
-    "butterfly":    "a butterfly",
+    "heart":        "heart",
+    "star":         "five-pointed star",
+    "cloud":        "cloud",
+    "moon":         "crescent moon",
+    "rainbow":      "rainbow arc",
+    "lightning":    "lightning bolt",
+    "fire":         "flame fire",
+    "flower":       "daisy flower",
+    "leaf":         "leaf",
+    "butterfly":    "butterfly",
+    "tree":         "tree",
+
     # ── 패션/소품 ──
     "sunglasses":   "sunglasses",
-    "crown":        "a crown",
-    "hat":          "a party hat",
-    "bow":          "a ribbon bow",
-    "diamond":      "a diamond gem",
+    "crown":        "crown",
+    "hat":          "party hat",
+    "bow":          "ribbon bow",
+    "diamond":      "diamond gem",
     "cat_ears":     "cat ears",
     "rabbit_ears":  "bunny ears",
-    "mustache":      "a mustache",
+    "mustache":      "mustache",
     "whiskers":     "cat whiskers",
     # ── 기타 ──
-    "arrow":        "an arrow",
-    "music_note":   "a musical note",
-    "speech_bubble":"a speech bubble",
-    "bomb":         "a cartoon bomb",
-    "unknown":      "a decorative accessory",
+    "arrow":        "arrow",
+    "music_note":   "musical note",
+    "speech_bubble":"speech bubble",
+    "bomb":         "cartoon bomb",
+    "unknown":      "decorative accessory",
 }
 
 # CLIP 후보 텍스트 — 각 shape의 손그림 특징을 설명
@@ -62,6 +64,7 @@ _CLIP_CANDIDATES = {
     "flower":       "a hand-drawn flower with petals around center, sketch",
     "leaf":         "a hand-drawn leaf shape with pointed tip, sketch",
     "butterfly":    "a hand-drawn butterfly shape with two wings, sketch",
+    "tree":         "a hand-drawn tree shape with a trunk and a leafy canopy, sketch",
     # ── 패션/소품 ──
     "sunglasses":   "a hand-drawn sunglasses shape with two round lenses, sketch",
     "crown":        "a hand-drawn crown shape with pointed tips on top, sketch",

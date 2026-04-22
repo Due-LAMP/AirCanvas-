@@ -3,6 +3,8 @@ import os
 import cv2
 import numpy as np
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
 import assets
 
@@ -39,14 +41,15 @@ except Exception as _e:
     print(f'[경고] mediapipe 로드 실패: {_e}', flush=True)
     _SELFIE_SEG_AVAILABLE = False
 
-_selfie_seg_instance = None
+_selfie_seg_local = threading.local()
 
 
 def _get_selfie_seg():
-    global _selfie_seg_instance
-    if _selfie_seg_instance is None and _SELFIE_SEG_AVAILABLE:
-        _selfie_seg_instance = _mp_module.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
-    return _selfie_seg_instance
+    if not _SELFIE_SEG_AVAILABLE:
+        return None
+    if not hasattr(_selfie_seg_local, 'instance'):
+        _selfie_seg_local.instance = _mp_module.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+    return _selfie_seg_local.instance
 
 
 def fill_mask_interior(mask_bin):
@@ -153,6 +156,24 @@ def remove_bg_composite(img_bgr, bg_bgr):
     return composite
 
 
+def _process_one_photo(args):
+    """단일 사진 처리 (배경 교체 + 인페인팅) - ThreadPoolExecutor 워커용."""
+    i, clean, drawn, mask, bg_img, style_preset = args
+    # Step 1: 배경 합성 (MediaPipe - thread-local 인스턴스 사용)
+    if bg_img is not None:
+        print(f'[AI] 사진 {i+1}/4 배경 교체 중 (MediaPipe)...', flush=True)
+        base = remove_bg_composite(clean, bg_img)
+    else:
+        base = clean.copy()
+    # Step 2: 인페인팅 (Stability API HTTP 요청)
+    has_drawing = (cv2.countNonZero(mask) > 0)
+    if has_drawing:
+        print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
+        base = pixelart_inpaint_one(base, mask, reference_bgr=drawn,
+                                    style_preset=style_preset)
+    return i, base
+
+
 def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_name, bg_img):
     try:
         if not config.STABILITY_API_KEY:
@@ -161,21 +182,20 @@ def build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_
         style_preset = theme_name if theme_name else 'pixel-art'
         print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}', flush=True)
 
-        ai_photos = []
-        for i, (clean, drawn, mask) in enumerate(zip(clean_photos[:4], drawn_photos[:4], masks[:4])):
-            # Step 1: 배경 합성 먼저 (MediaPipe segmentation)
-            if bg_img is not None:
-                print(f'[AI] 사진 {i+1}/4 배경 교체 중 (MediaPipe)...', flush=True)
-                base = remove_bg_composite(clean, bg_img)
-            else:
-                base = clean.copy()
-            # Step 2: 합성된 이미지에 inpainting (CLIP 색추출 + SD API)
-            has_drawing = (cv2.countNonZero(mask) > 0)
-            if has_drawing:
-                print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
-                base = pixelart_inpaint_one(base, mask, reference_bgr=drawn,
-                                            style_preset=style_preset)
-            ai_photos.append(base)
+        n = min(4, len(clean_photos), len(drawn_photos), len(masks))
+        task_args = [
+            (i, clean_photos[i], drawn_photos[i], masks[i], bg_img, style_preset)
+            for i in range(n)
+        ]
+
+        ai_photos = [None] * n
+        print(f'[AI] 사진 {n}장 병렬 처리 시작 (최대 {n}개 스레드)...', flush=True)
+        with ThreadPoolExecutor(max_workers=n) as executor:
+            futures = {executor.submit(_process_one_photo, args): args[0] for args in task_args}
+            for future in as_completed(futures):
+                idx, result = future.result()
+                ai_photos[idx] = result
+                print(f'[AI] 사진 {idx+1}/4 완료', flush=True)
 
         if assets.frame_raw is not None:
             fh, fw = assets.frame_raw.shape[:2]

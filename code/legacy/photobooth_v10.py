@@ -15,12 +15,15 @@ from datetime import datetime
 import qrcode
 from PIL import Image
 
+# legacy/ 의 한 단계 위(code/)를 루트로 사용
+_CODE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 # Gmail API
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'gmail_api'))
+sys.path.insert(0, os.path.join(_CODE_DIR, 'gmail_api'))
 from send_message import gmail_send_message_with_attachment
 
 # photo_post_process (shape_classifier + aircanvas_inpainting)
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'photo_post_process'))
+sys.path.insert(0, os.path.join(_CODE_DIR, 'photo_post_process'))
 try:
     from shape_classifier import classify as _classify_shape
     _SHAPE_CLASSIFIER_AVAILABLE = True
@@ -34,6 +37,16 @@ try:
 except Exception as _e:
     print(f'[경고] aircanvas_inpainting 로드 실패: {_e}')
     _INPAINTING_AVAILABLE = False
+
+try:
+    from prompt_utils import (
+        build_inpaint_prompt as _build_inpaint_prompt,
+        detect_sketch_color_weights_from_arrays as _detect_sketch_color_weights_from_arrays,
+    )
+    _PROMPT_UTILS_AVAILABLE = True
+except Exception as _e:
+    print(f'[경고] prompt_utils 로드 실패: {_e}')
+    _PROMPT_UTILS_AVAILABLE = False
 
 try:
     from carvekit.api.high import HiInterface as _HiInterface
@@ -87,8 +100,8 @@ HOLD_PHOTO   = 0.2
 HOLD_RESET   = 3.0
 
 # ─── 테마 / 배경 선택 그리드 ───────────────────────────────────
-SOURCE_THEME_PATH      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme.png')
-SOURCE_THEME_MASK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme_mask.png')
+SOURCE_THEME_PATH      = os.path.join(_CODE_DIR, 'image/source_theme.png')
+SOURCE_THEME_MASK_PATH = os.path.join(_CODE_DIR, 'image/source_theme_mask.png')
 
 def _load_cells_from_mask(mask_path, min_area=3000):
     _m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
@@ -114,8 +127,8 @@ SOURCE_THEME_CELLS = _theme_cells_from_mask if _theme_cells_from_mask else [
     (705, 398, 937, 554),   # 5: photographic
 ]
 SOURCE_THEME_NAMES   = ['analog-film', 'origami', 'pixel-art', 'neon-punk', '3d-model', 'photographic']
-SOURCE_BG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background.png')
-SOURCE_BG_MASK_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background_mask.png')
+SOURCE_BG_PATH       = os.path.join(_CODE_DIR, 'image/source_background.png')
+SOURCE_BG_MASK_PATH  = os.path.join(_CODE_DIR, 'image/source_background_mask.png')
 SOURCE_BG_COLS       = 4   # 가로 셀 수
 SOURCE_BG_ROWS       = 2   # 세로 행 수
 # 마스크에서 추출한 8개 칸의 실제 픽셀 좌표 (x1,y1,x2,y2) in 1024×600 원본 기준
@@ -133,7 +146,7 @@ SOURCE_BG_NAMES = [
     'white', 'skyblue', 'lightpink', 'lightgreen',
     'beach', 'space', 'zombie', 'chimchakman',
 ]
-SOURCE_IMAGE_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source')
+SOURCE_IMAGE_DIR  = os.path.join(_CODE_DIR, 'image/source')
 SOURCE_BG_FILES   = [
     'White.jpg', 'Skyblue.jpg', 'Lightpink.jpg', 'Green.jpg',
     'Beach.jpg', 'Space.jpg',   'Zombie.jpg',     'Chimchakman.jpg',
@@ -144,7 +157,7 @@ PALETTE_CX      = 32
 PALETTE_RADIUS  = 18
 PALETTE_SPACING = 46
 
-_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_BASE_DIR = _CODE_DIR
 
 # ─── 배경 / 네컷 프레임 PNG ────────────────────────────────────
 BG_IMAGE_PATH        = os.path.join(_BASE_DIR, 'image/background_line.png')
@@ -269,7 +282,7 @@ GestureRecognizerOptions = mp.tasks.vision.GestureRecognizerOptions
 RunningMode              = mp.tasks.vision.RunningMode
 
 _mp_options = GestureRecognizerOptions(
-    base_options=BaseOptions(model_asset_path=os.path.join(_BASE_DIR, 'gesture_recognizer.task')),
+    base_options=BaseOptions(model_asset_path=os.path.join(_BASE_DIR, 'models/gesture_recognizer.task')),
     num_hands=1,
     min_hand_detection_confidence=0.5,
     min_tracking_confidence=0.5,
@@ -569,7 +582,7 @@ def _fill_mask_interior(mask_bin):
     return cv2.bitwise_or(interior, mask_bin)
 
 
-def _pixelart_inpaint_one(img_bgr, mask_gray, style_preset='pixel-art'):
+def _pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='pixel-art'):
     """
     마스크 영역을 shape 감지 후 지정 스타일로 인페인팅.
     style_preset: Stability AI style_preset 문자열
@@ -597,28 +610,35 @@ def _pixelart_inpaint_one(img_bgr, mask_gray, style_preset='pixel-art'):
 
     # shape 감지 → 프롬프트
     style_label = style_preset.replace('-', ' ')
-    prompt = (
-        f'{style_label} style object, vivid colors, '
-        'seamlessly blended with surrounding photo'
-    )
+    shape_name = 'unknown'
+    subject_prompt = 'a decorative accessory'
     if _SHAPE_CLASSIFIER_AVAILABLE:
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tf:
             tmp_path = tf.name
         try:
             cv2.imwrite(tmp_path, mask_gray)
-            shape_name, _, _conf = _classify_shape(tmp_path)
-            if shape_name != 'unknown':
-                subject = shape_name.replace('_', ' ')
-                prompt = (
-                    f'Add {subject} in {style_label} style, '
-                    'vivid colors, seamlessly blended with surrounding photo'
-                )
-            print(f'[AI] 형태 감지: {shape_name} / 스타일: {style_preset}')
+            shape_name, subject_prompt, _conf = _classify_shape(tmp_path)
         finally:
             try:
                 os.unlink(tmp_path)
             except Exception:
                 pass
+
+    prompt = (
+        f"Add {subject_prompt} naturally in the masked area.\n"
+        f"Match the photo's lighting, angle, and scale.\n"
+        f"Keep the person's face, hair, body, and clothes unchanged.\n"
+        f"Do not generate person, face, or body parts in the masked area.\n"
+        f"Focus on the {subject_prompt} and make it look like a natural part of the photo."
+    )
+    if _PROMPT_UTILS_AVAILABLE:
+        color_weights = []
+        if reference_bgr is not None:
+            reference_rgb = cv2.cvtColor(reference_bgr, cv2.COLOR_BGR2RGB)
+            color_weights = _detect_sketch_color_weights_from_arrays(reference_rgb, mask_gray)
+        prompt = _build_inpaint_prompt(shape_name, subject_prompt, color_weights)
+
+    print(f'[AI] 형태 감지: {shape_name} / 스타일: {style_preset} / 프롬프트: ```\n{prompt}\n```')
 
     result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset=style_preset)
 
@@ -663,7 +683,7 @@ def _remove_bg_composite(img_bgr, bg_bgr):
     return cv2.cvtColor(result, cv2.COLOR_RGB2BGR)
 
 
-def _build_ai_4cut(clean_photos, masks, session_dir, bucket, theme_name, bg_img):
+def _build_ai_4cut(clean_photos, drawn_photos, masks, session_dir, bucket, theme_name, bg_img):
     """
     백그라운드 스레드:
     1) bg_img 선택 시 → carvekit 배경 제거 후 합성
@@ -678,7 +698,7 @@ def _build_ai_4cut(clean_photos, masks, session_dir, bucket, theme_name, bg_img)
         print(f'[AI] 테마={style_preset}, 배경={"선택됨" if bg_img is not None else "원본"}')
 
         ai_photos = []
-        for i, (clean, mask) in enumerate(zip(clean_photos[:4], masks[:4])):
+        for i, (clean, drawn, mask) in enumerate(zip(clean_photos[:4], drawn_photos[:4], masks[:4])):
             print(f'[AI] 사진 {i+1}/4 처리 중...')
 
             # Step 1: 배경 교체 (bg_img 선택 시)
@@ -689,7 +709,7 @@ def _build_ai_4cut(clean_photos, masks, session_dir, bucket, theme_name, bg_img)
             # Step 2: 마스크 영역 인페인팅 (드로잉 있을 때만)
             has_drawing = (cv2.countNonZero(mask) > 0)
             if has_drawing:
-                out = _pixelart_inpaint_one(base, mask, style_preset=style_preset)
+                out = _pixelart_inpaint_one(base, mask, reference_bgr=drawn, style_preset=style_preset)
             else:
                 out = base
             ai_photos.append(out)
@@ -1185,7 +1205,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                         ai_collage = None
                         ai_thread_main = threading.Thread(
                             target=_build_ai_4cut,
-                            args=(list(photos_clean), list(draw_masks), session_dir,
+                            args=(list(photos_clean), list(photos), list(draw_masks), session_dir,
                                   ai_bucket, selected_theme_name, selected_bg_img),
                             daemon=True,
                         )

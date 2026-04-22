@@ -36,7 +36,7 @@ SOURCE_THEME_CELLS_FALLBACK = [
     (396, 398, 627, 554),
     (705, 398, 937, 554),
 ]
-SOURCE_THEME_NAMES = ['analog-film', 'origami', 'pixel-art', 'neon-punk', '3d-model', 'photographic']
+SOURCE_THEME_NAMES = ['analog-film', 'origami', 'pixel-art', 'comic-book', '3d-model', 'photographic']
 
 # ── 배경 그리드 ───────────────────────────────────────────────────
 SOURCE_BG_PATH      = os.path.join(_BASE_DIR, 'image/source_background.png')

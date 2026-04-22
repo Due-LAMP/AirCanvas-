@@ -34,6 +34,34 @@ def _sigint_handler(sig, frame):
 signal.signal(signal.SIGINT, _sigint_handler)
 
 
+def _decode_email_input_key(key: int):
+    """OpenCV 키 코드를 이메일 입력용 제어/문자로 정규화한다."""
+    if key < 0:
+        return None, None
+
+    enter_codes = {10, 13, 3}
+    escape_codes = {27}
+    backspace_codes = {8, 127}
+
+    if key in enter_codes:
+        return 'enter', None
+    if key in escape_codes:
+        return 'escape', None
+    if key in backspace_codes:
+        return 'backspace', None
+
+    key_ascii = key & 0xFF
+    if key_ascii in enter_codes:
+        return 'enter', None
+    if key_ascii in escape_codes:
+        return 'escape', None
+    if key_ascii in backspace_codes:
+        return 'backspace', None
+    if 32 <= key_ascii <= 126:
+        return 'text', chr(key_ascii)
+    return None, None
+
+
 # ── MediaPipe 설정 ────────────────────────────────────────────────
 BaseOptions              = mp.tasks.BaseOptions
 GestureRecognizer        = mp.tasks.vision.GestureRecognizer
@@ -52,24 +80,39 @@ _mp_options = GestureRecognizerOptions(
 
 # ── 카메라 초기화 ─────────────────────────────────────────────────
 def _init_camera():
-    for idx in range(20):
-        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
-        if not cap.isOpened():
+    if sys.platform == 'darwin':
+        backend_candidates = [
+            ('AVFoundation', getattr(cv2, 'CAP_AVFOUNDATION', None)),
+            ('Default', None),
+        ]
+    else:
+        backend_candidates = [
+            ('V4L2', getattr(cv2, 'CAP_V4L2', None)),
+            ('Default', None),
+        ]
+
+    for backend_name, backend in backend_candidates:
+        for idx in range(10):
+            cap = cv2.VideoCapture(idx) if backend is None else cv2.VideoCapture(idx, backend)
+            if not cap.isOpened():
+                cap.release()
+                continue
+
+            if sys.platform != 'darwin':
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap.set(cv2.CAP_PROP_FPS, 30)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.ndim == 3:
+                w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                print(f"[카메라] backend={backend_name}, index={idx} 연결됨 ({w}x{h} @ {fps:.0f}fps)")
+                return cap
             cap.release()
-            continue
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        cap.set(cv2.CAP_PROP_FPS, 30)
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        ret, frame = cap.read()
-        if ret and frame is not None and frame.ndim == 3:
-            w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            print(f"[카메라] /dev/video{idx} 연결됨 ({w}x{h} @ {fps:.0f}fps MJPG)")
-            return cap
-        cap.release()
     return None
 
 
@@ -672,10 +715,11 @@ def run():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, config.GRAY, 1, cv2.LINE_AA)
 
             cv2.imshow('PhotoBooth', canvas)
-            key = cv2.waitKey(1)
+            key = cv2.waitKeyEx(1)
 
             if state == config.STATE_EMAIL_INPUT:
-                if key in (13, 10):
+                key_type, key_value = _decode_email_input_key(key)
+                if key_type == 'enter':
                     if saver.email_input_text.strip():
                         attachments = [os.path.join(session_dir, "4cut.jpg")]
                         ai_path = os.path.join(session_dir, "ai_4cut.jpg")
@@ -686,14 +730,12 @@ def run():
                                          args=(attachments, saver.email_input_text.strip()),
                                          daemon=True).start()
                     state = config.STATE_RESULT
-                elif key == 27:
+                elif key_type == 'escape':
                     state = config.STATE_RESULT
-                elif key in (8, 127):
+                elif key_type == 'backspace':
                     saver.email_input_text = saver.email_input_text[:-1]
-                elif key >= 0:
-                    key_ascii = key & 0xFF
-                    if 32 <= key_ascii <= 126:
-                        saver.email_input_text += chr(key_ascii)
+                elif key_type == 'text' and key_value is not None:
+                    saver.email_input_text += key_value
             elif key & 0xFF in (27, ord('q')):
                 break
 

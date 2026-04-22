@@ -712,14 +712,16 @@ def run(screen_record: bool = False):
                         cv2.putText(canvas, "REPLAY", (config.CAM_X + 10, config.CAM_Y + 24),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.WHITE, 1, cv2.LINE_AA)
                         # AI 생성 중 자막
-                        _ai_text = "AI Generating..."
-                        _ai_tw = cv2.getTextSize(_ai_text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)[0][0]
-                        _ai_tx = config.CAM_X + (config.CAM_W - _ai_tw) // 2
-                        _ai_ty = config.CAM_Y + config.CAM_H - 16
-                        cv2.putText(canvas, _ai_text, (_ai_tx, _ai_ty),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, config.BLACK, 4, cv2.LINE_AA)
-                        cv2.putText(canvas, _ai_text, (_ai_tx, _ai_ty),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
+                        if int(time.time() * 2) % 2 == 0:
+                            dots = "." * (int(time.time() * 1.5) % 4)
+                            _ai_text = f"GENERATING{dots}"
+                            (gw, _), _ = cv2.getTextSize(_ai_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 3)
+                            _ai_tx = config.CAM_X + (config.CAM_W - gw) // 2
+                            _ai_ty = config.CAM_Y + config.CAM_H - 18
+                            cv2.putText(canvas, _ai_text, (_ai_tx, _ai_ty),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.BLACK, 3, cv2.LINE_AA)
+                            cv2.putText(canvas, _ai_text, (_ai_tx, _ai_ty),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, config.WHITE, 1, cv2.LINE_AA)
 
 
             else:

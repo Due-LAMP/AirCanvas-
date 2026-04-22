@@ -90,6 +90,14 @@ _clip_processor = None
 def _load_clip():
     global _clip_model, _clip_processor
     if _clip_model is None:
+        import logging
+        import os as _os
+        import transformers as _tr
+        _tr.logging.set_verbosity_error()
+        logging.getLogger("transformers").setLevel(logging.ERROR)
+        logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+        _os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         from transformers import CLIPProcessor, CLIPModel
         print("  CLIP 모델 로딩 중... (최초 1회)")
         _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")

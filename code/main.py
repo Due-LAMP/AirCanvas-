@@ -23,6 +23,16 @@ for _f in (config.VID_TMP, config.VID_PLAY):
     except Exception:
         pass
 
+# ── CLIP 백그라운드 프리로드 ──────────────────────────────────────
+def _preload_clip():
+    try:
+        from shape_classifier import _load_clip
+        _load_clip()
+    except Exception as _e:
+        print(f"[CLIP 프리로드] 실패 (무시): {_e}", flush=True)
+
+threading.Thread(target=_preload_clip, daemon=True).start()
+
 # ── Ctrl+C 안전 종료 ──────────────────────────────────────────────
 _exit_requested = False
 

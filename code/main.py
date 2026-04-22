@@ -123,15 +123,22 @@ def run():
         sys.exit(1)
 
     print("=" * 55)
-    print("  인생네컷 포토부스  v9 + QR + Email + Theme/BG Select")
+    print("  인생네컷 포토부스 + QR + Email + Theme/BG Select")
     print("=" * 55)
-    print("  open           : 인트로 → 테마 선택 시작")
-    print("  peace          : 촬영 / 선택 확정 (홀드)")
+    print(" ######## 제스처 안내 ########")
+    print(" [인트로]")
+    print("  open           : 테마 & 배경 선택 시작")
+    print(" [선택 화면]")
+    print("  thumb up       : 테마 & 배경 선택")
+    print(" [촬영 화면]")
     print("  hand (기본)    : 팔레트 터치로 색 변경 / 커서")
-    print("  fist 0.2s 홀드 : PAINT ↔ ERASE 전환")
-    print("  thumb down     : DEFAULT 모드로 복귀")
+    print("  fist 0.2s 홀드 : DEFAULT -> PAINT / PAINT ↔ ERASE 전환")
+    print("  thumb down     : PAINT 초기화")
+    print("  open           : DEFAULT 모드로 전환")
+    print("  peace          : 촬영 시작")
+    print(" [결과 화면]")
+    print("  thumb up       : 이메일 전송")
     print("  open 3s 홀드   : 리뷰/결과/이메일 화면에서 초기화")
-    print("  thumb up       : [결과 화면] 이메일 전송")
     print("  ESC / q        : 종료")
     print("=" * 55)
 
@@ -161,8 +168,8 @@ def run():
     victory_fired    = False
 
     countdown_cooldown_until   = 0.0
-    select_peace_start         = None
-    select_peace_cooldown_until = 0.0
+    selection_hold_start       = None
+    selection_cooldown_until   = 0.0
 
     selected_theme_name = None
     selected_bg_img     = None
@@ -238,7 +245,7 @@ def run():
                 thumbdown_fired  = False
                 victory_start    = None
                 victory_fired    = False
-                select_peace_start = None
+                selection_hold_start = None
             else:
                 for i, hand_landmarks in enumerate(result.hand_landmarks):
                     raw     = result.gestures[i][0].category_name if result.gestures else 'None'
@@ -355,21 +362,21 @@ def run():
                     if hit >= 0:
                         theme_hovered_cell = hit
 
-                if gesture == 'peace':
-                    if select_peace_start is None:
-                        select_peace_start = now
-                    elif now - select_peace_start >= config.HOLD_SELECT and theme_hovered_cell >= 0:
+                if gesture == 'thumbup':
+                    if selection_hold_start is None:
+                        selection_hold_start = now
+                    elif now - selection_hold_start >= config.HOLD_SELECT and theme_hovered_cell >= 0:
                         selected_theme_name = config.SOURCE_THEME_NAMES[theme_hovered_cell]
                         print(f"[테마 선택] 셀 {theme_hovered_cell} '{selected_theme_name}'")
                         state = config.STATE_SELECT_BG
                         bg_hovered_cell = -1
-                        select_peace_start = None
-                        select_peace_cooldown_until = now + config.THEME_TO_BG_COOLDOWN
+                        selection_hold_start = None
+                        selection_cooldown_until = now + config.THEME_TO_BG_COOLDOWN
                         countdown_cooldown_until = now + 1.5
                         victory_start = None
                         victory_fired = False
                 else:
-                    select_peace_start = None
+                    selection_hold_start = None
 
             # ── 배경 선택 제스처
             if state == config.STATE_SELECT_BG and result is not None and result.hand_landmarks:
@@ -382,10 +389,10 @@ def run():
                     if hit >= 0:
                         bg_hovered_cell = hit
 
-                if gesture == 'peace' and now >= select_peace_cooldown_until:
-                    if select_peace_start is None:
-                        select_peace_start = now
-                    elif now - select_peace_start >= config.HOLD_SELECT and bg_hovered_cell >= 0:
+                if gesture == 'thumbup' and now >= selection_cooldown_until:
+                    if selection_hold_start is None:
+                        selection_hold_start = now
+                    elif now - selection_hold_start >= config.HOLD_SELECT and bg_hovered_cell >= 0:
                         name    = config.SOURCE_BG_NAMES[bg_hovered_cell]
                         bg_file = os.path.join(config.SOURCE_IMAGE_DIR, config.SOURCE_BG_FILES[bg_hovered_cell])
                         _loaded = cv2.imread(bg_file)
@@ -396,12 +403,12 @@ def run():
                             selected_bg_img = None
                             print(f"[배경 선택] 파일 로드 실패: {bg_file}")
                         state = config.STATE_WAITING
-                        select_peace_start = None
+                        selection_hold_start = None
                         countdown_cooldown_until = now + 1.5
                         victory_start = None
                         victory_fired = False
                 else:
-                    select_peace_start = None
+                    selection_hold_start = None
 
             # ── open 3초 홀드 → 리뷰/결과/이메일 초기화
             _open_held = (gesture == 'open' or last_gesture == 'open') and gesture != 'thumbup'
@@ -529,8 +536,8 @@ def run():
                     finger_x = int(hand[8].x * canvas.shape[1])
                     finger_y = int(hand[8].y * canvas.shape[0])
                 theme_hovered_cell = ui.draw_theme_grid(canvas, theme_hovered_cell, finger_x, finger_y)
-                if select_peace_start is not None and finger_x >= 0:
-                    prog  = min((now - select_peace_start) / config.HOLD_SELECT, 1.0)
+                if selection_hold_start is not None and finger_x >= 0:
+                    prog  = min((now - selection_hold_start) / config.HOLD_SELECT, 1.0)
                     angle = int(-360 * prog)
                     cv2.ellipse(canvas, (finger_x, finger_y), (22, 22), -90, 0, angle, (0, 220, 255), 3)
 
@@ -541,8 +548,8 @@ def run():
                     finger_x = int(hand[8].x * canvas.shape[1])
                     finger_y = int(hand[8].y * canvas.shape[0])
                 bg_hovered_cell = ui.draw_bg_grid(canvas, bg_hovered_cell, finger_x, finger_y)
-                if select_peace_start is not None and finger_x >= 0:
-                    prog  = min((now - select_peace_start) / config.HOLD_SELECT, 1.0)
+                if selection_hold_start is not None and finger_x >= 0:
+                    prog  = min((now - selection_hold_start) / config.HOLD_SELECT, 1.0)
                     angle = int(-360 * prog)
                     cv2.ellipse(canvas, (finger_x, finger_y), (22, 22), -90, 0, angle, (0, 220, 255), 3)
 

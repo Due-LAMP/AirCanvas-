@@ -27,12 +27,12 @@ def step1_inpaint(
 
     request_metadata = {
         "style_preset": style_preset,
-        "grow_mask": data["grow_mask"],
+        # "grow_mask": data["grow_mask"],
         "output_format": data["output_format"],
         "prompt": data["prompt"],
         "negative_prompt": data["negative_prompt"],
-        "image_bytes": len(image_bytes),
-        "mask_bytes": len(mask_bytes),
+        # "image_bytes": len(image_bytes),
+        # "mask_bytes": len(mask_bytes),
     }
     print(f"[Step 1] Stability metadata: {request_metadata}")
 

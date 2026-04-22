@@ -176,6 +176,14 @@ def draw_selection_grid(canvas, src_img, cells, hovered_cell, finger_x=-1, finge
         cv2.circle(canvas, (finger_x, finger_y), 10, (0, 220, 255), 2)
         cv2.circle(canvas, (finger_x, finger_y), 4, (0, 220, 255), -1)
 
+    overlay = canvas.copy()
+    cv2.rectangle(overlay, (18, 18), (cw - 18, 92), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+    cv2.putText(canvas, "Move the cursor to a tile", (36, 48),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, config.WHITE, 2, cv2.LINE_AA)
+    cv2.putText(canvas, "Hold THUMB UP to confirm selection", (36, 78),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 255), 2, cv2.LINE_AA)
+
     return hover
 
 

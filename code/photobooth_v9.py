@@ -87,8 +87,25 @@ HOLD_PHOTO   = 0.2
 HOLD_RESET   = 3.0
 
 # ─── 테마 / 배경 선택 그리드 ───────────────────────────────────
-SOURCE_THEME_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme.png')
-SOURCE_THEME_CELLS   = [
+SOURCE_THEME_PATH      = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme.png')
+SOURCE_THEME_MASK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_theme_mask.png')
+
+def _load_cells_from_mask(mask_path, min_area=3000):
+    _m = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    if _m is None:
+        return None
+    _, _bin = cv2.threshold(_m, 50, 255, cv2.THRESH_BINARY_INV)
+    _n, _, _stats, _ = cv2.connectedComponentsWithStats(_bin, connectivity=8)
+    _cells = []
+    for _i in range(1, _n):
+        _x, _y, _w, _h, _a = _stats[_i]
+        if _a >= min_area:
+            _cells.append((_x, _y, _x + _w, _y + _h))
+    _cells.sort(key=lambda c: (c[1], c[0]))
+    return _cells
+
+_theme_cells_from_mask = _load_cells_from_mask(SOURCE_THEME_MASK_PATH)
+SOURCE_THEME_CELLS = _theme_cells_from_mask if _theme_cells_from_mask else [
     (86,  190, 318, 346),   # 0: analog
     (396, 190, 627, 346),   # 1: origami
     (705, 190, 937, 346),   # 2: pixel art
@@ -96,8 +113,8 @@ SOURCE_THEME_CELLS   = [
     (396, 398, 627, 554),   # 4: 3D model
     (705, 398, 937, 554),   # 5: photographic
 ]
-SOURCE_THEME_NAMES   = ['analog', 'origami', 'pixel-art', 'neon-punk', '3d-model', 'photographic']
-SOURCE_BG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background.PNG')
+SOURCE_THEME_NAMES   = ['analog-film', 'origami', 'pixel-art', 'neon-punk', '3d-model', 'photographic']
+SOURCE_BG_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background.png')
 SOURCE_BG_MASK_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source_background_mask.png')
 SOURCE_BG_COLS       = 4   # 가로 셀 수
 SOURCE_BG_ROWS       = 2   # 세로 행 수
@@ -115,6 +132,11 @@ SOURCE_BG_CELLS = [
 SOURCE_BG_NAMES = [
     'white', 'skyblue', 'lightpink', 'lightgreen',
     'beach', 'space', 'zombie', 'chimchakman',
+]
+SOURCE_IMAGE_DIR  = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'image/source')
+SOURCE_BG_FILES   = [
+    'White.jpg', 'Skyblue.jpg', 'Lightpink.jpg', 'Green.jpg',
+    'Beach.jpg', 'Space.jpg',   'Zombie.jpg',     'Chimchakman.jpg',
 ]
 
 # ─── 색상 팔레트 (카메라 내) ──────────────────────────────────
@@ -171,7 +193,7 @@ PEN_COLORS = [
     (60,  200,  60),
     (255, 120,   0),
     (200,  60, 180),
-    (255, 255, 255),
+    (0,    0,   0),
 ]
 
 # ─── 저장 경로 ─────────────────────────────────────────────────
@@ -317,7 +339,7 @@ elif _frame_raw.shape[2] == 3:
     _frame_raw = bgra
     print("[프레임] 알파채널 없음 → 흰색 투명 처리")
 
-# ── source_theme.png / source_background.PNG 로드 ──────────────────────
+# ── source_theme.png / source_background.png 로드 ──────────────────────
 _source_theme_img = cv2.imread(SOURCE_THEME_PATH)
 if _source_theme_img is None:
     print(f"[경고] source_theme.png 로드 실패: {SOURCE_THEME_PATH}")
@@ -326,7 +348,7 @@ else:
 
 _source_bg_img = cv2.imread(SOURCE_BG_PATH)
 if _source_bg_img is None:
-    print(f"[경고] source_background.PNG 로드 실패: {SOURCE_BG_PATH}")
+    print(f"[경고] source_background.png 로드 실패: {SOURCE_BG_PATH}")
 else:
     _sbh, _sbw = _source_bg_img.shape[:2]
     print(f"[배경 그리드] {_sbw}x{_sbh}, {len(SOURCE_BG_CELLS)}개 칸 (마스크 기반)")
@@ -335,8 +357,10 @@ selected_theme_name = None   # 선택된 테마 이름
 selected_bg_img     = None   # 선택된 배경 BGR ndarray
 theme_hovered_cell  = -1     # 테마 호버 셀 (0~5)
 bg_hovered_cell     = -1     # 배경 호버 셀 (0~7)
-select_peace_start  = None   # 선택 화면 Victory 홀드 시작 시각
+select_peace_start        = None   # 선택 화면 Victory 홀드 시작 시각
+select_peace_cooldown_until = 0.0  # 테마→배경 전환 후 브이 무시 구간 종료 시각
 HOLD_SELECT         = 0.8    # 선택 확정에 필요한 Victory 홀드 시간 (초)
+THEME_TO_BG_COOLDOWN = 1.5   # 테마 확정 후 배경 선택에서 브이 무시 시간 (초)
 
 _bg_resized = None
 
@@ -1054,6 +1078,7 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                     state = STATE_SELECT_BG
                     bg_hovered_cell = -1
                     select_peace_start = None
+                    select_peace_cooldown_until = now + THEME_TO_BG_COOLDOWN
                     countdown_cooldown_until = now + 1.5
                     victory_start = None
                     victory_fired = False
@@ -1071,18 +1096,20 @@ with GestureRecognizer.create_from_options(_mp_options) as recognizer:
                 if hit >= 0:
                     bg_hovered_cell = hit
 
-            # Victory → 홀드 후 선택 확정
-            if gesture == 'peace':
+            # Victory → 홀드 후 선택 확정 (테마 전환 직후 쿨다운 중엔 무시)
+            if gesture == 'peace' and now >= select_peace_cooldown_until:
                 if select_peace_start is None:
                     select_peace_start = now
                 elif now - select_peace_start >= HOLD_SELECT and bg_hovered_cell >= 0:
-                    if _source_bg_img is not None:
-                        sx1, sy1, sx2, sy2 = SOURCE_BG_CELLS[bg_hovered_cell]
-                        selected_bg_img = _source_bg_img[sy1:sy2, sx1:sx2].copy()
-                        row = bg_hovered_cell // SOURCE_BG_COLS
-                        col = bg_hovered_cell % SOURCE_BG_COLS
-                        name = SOURCE_BG_NAMES[bg_hovered_cell]
-                        print(f"[배경 선택] 셀 {bg_hovered_cell} '{name}'  (행{row+1} 열{col+1})  크기={selected_bg_img.shape[1]}x{selected_bg_img.shape[0]}")
+                    name = SOURCE_BG_NAMES[bg_hovered_cell]
+                    bg_file = os.path.join(SOURCE_IMAGE_DIR, SOURCE_BG_FILES[bg_hovered_cell])
+                    _loaded = cv2.imread(bg_file)
+                    if _loaded is not None:
+                        selected_bg_img = _loaded
+                        print(f"[배경 선택] 셀 {bg_hovered_cell} '{name}'  {bg_file}  크기={_loaded.shape[1]}x{_loaded.shape[0]}")
+                    else:
+                        selected_bg_img = None
+                        print(f"[배경 선택] 파일 로드 실패: {bg_file}")
                     state = STATE_WAITING
                     select_peace_start = None
                     countdown_cooldown_until = now + 1.5

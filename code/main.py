@@ -395,15 +395,19 @@ def run(screen_record: bool = False):
                     if selection_hold_start is None:
                         selection_hold_start = now
                     elif now - selection_hold_start >= config.HOLD_SELECT and bg_hovered_cell >= 0:
-                        name    = config.SOURCE_BG_NAMES[bg_hovered_cell]
-                        bg_file = os.path.join(config.SOURCE_IMAGE_DIR, config.SOURCE_BG_FILES[bg_hovered_cell])
-                        _loaded = cv2.imread(bg_file)
-                        if _loaded is not None:
-                            selected_bg_img = _loaded
-                            print(f"[배경 선택] 셀 {bg_hovered_cell} '{name}'  {bg_file}  크기={_loaded.shape[1]}x{_loaded.shape[0]}")
-                        else:
+                        name = config.SOURCE_BG_NAMES[bg_hovered_cell]
+                        if name == 'none':
                             selected_bg_img = None
-                            print(f"[배경 선택] 파일 로드 실패: {bg_file}")
+                            print(f"[배경 선택] 셀 {bg_hovered_cell} 'none' → 배경 교체 없음 (inpainting만)")
+                        else:
+                            bg_file = os.path.join(config.SOURCE_IMAGE_DIR, config.SOURCE_BG_FILES[bg_hovered_cell])
+                            _loaded = cv2.imread(bg_file)
+                            if _loaded is not None:
+                                selected_bg_img = _loaded
+                                print(f"[배경 선택] 셀 {bg_hovered_cell} '{name}'  {bg_file}  크기={_loaded.shape[1]}x{_loaded.shape[0]}")
+                            else:
+                                selected_bg_img = None
+                                print(f"[배경 선택] 파일 로드 실패: {bg_file}")
                         state = config.STATE_WAITING
                         selection_hold_start = None
                         countdown_cooldown_until = now + 1.5

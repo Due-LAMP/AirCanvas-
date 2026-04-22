@@ -53,7 +53,7 @@ SOURCE_BG_CELLS = [
     (533, 391, 739, 546),
     (775, 391, 982, 546),
 ]
-SOURCE_BG_NAMES = ['white', 'skyblue', 'lightpink', 'lightgreen', 'beach', 'space', 'zombie', 'chimchakman']
+SOURCE_BG_NAMES = ['none', 'skyblue', 'lightpink', 'lightgreen', 'beach', 'space', 'zombie', 'chimchakman']
 SOURCE_IMAGE_DIR = os.path.join(_BASE_DIR, 'image/source')
 SOURCE_BG_FILES  = [
     'White.jpg', 'Skyblue.jpg', 'Lightpink.jpg', 'Lightgreen.jpg',

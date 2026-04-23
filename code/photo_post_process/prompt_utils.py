@@ -126,6 +126,7 @@ def _map_color_name_for_prompt(name: str) -> str:
 
 def build_inpaint_prompt(shape: str, subject_prompt: str, color_weights: ColorWeights) -> str:
     """shape 분류 결과와 스케치 색상을 바탕으로 인페인팅 프롬프트를 생성."""
+    print("build inpaint prompt with shape")
     subject = subject_prompt.strip() if subject_prompt else shape.replace("_", " ")
     subject = subject.rstrip(".")
     color_clause = ""

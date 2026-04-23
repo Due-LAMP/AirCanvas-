@@ -17,6 +17,7 @@ from pathlib import Path
 
 MODEL_PATH = Path(__file__).parent / "models" / "sketch_classifier.pt"
 CLIP_MODEL_ID = os.getenv("AIRCANVAS_CLIP_MODEL", "openai/clip-vit-base-patch32")
+# CLIP_MODEL_ID = os.getenv("AIRCANVAS_CLIP_MODEL", "openai/clip-vit-large-patch14")
 CLIP_FALLBACK_MODEL_ID = "openai/clip-vit-base-patch32"
 LOW_CONFIDENCE_FILLED_RETRY_THRESHOLD = 0.25
 LOW_CONFIDENCE_GENERIC_PROMPT_THRESHOLD = 0.3
@@ -30,12 +31,12 @@ SHAPE_TO_PROMPT: dict[str, str] = {
     "star":         "five-pointed star",
     "cloud":        "cloud",
     "moon":         "crescent moon",
-    "rainbow":      "rainbow arc",
+    # "rainbow":      "rainbow arc",
     "lightning":    "lightning bolt",
     "fire":         "flame fire",
     "flower":       "daisy flower",
-    "leaf":         "leaf",
-    "butterfly":    "butterfly",
+    # "leaf":         "leaf",
+    # "butterfly":    "butterfly",
     "tree":         "tree",
 
     # ── 패션/소품 ──
@@ -43,32 +44,32 @@ SHAPE_TO_PROMPT: dict[str, str] = {
     "crown":        "crown",
     "hat":          "party hat",
     "bow":          "ribbon bow",
-    "diamond":      "diamond gem",
+    # "diamond":      "diamond gem",
     "cat_ears":     "cat ears",
     "rabbit_ears":  "bunny ears",
     "mustache":      "mustache",
     "whiskers":     "cat whiskers",
     # ── 기타 ──
-    "arrow":        "arrow",
+    # "arrow":        "arrow",
     "music_note":   "musical note",
     "speech_bubble":"speech bubble",
-    "bomb":         "cartoon bomb",
+    # "bomb":         "cartoon bomb",
     "unknown":      "decorative accessory",
 }
 
 # CLIP 후보 텍스트 — 각 shape의 손그림 특징을 설명
 _CLIP_CANDIDATES = {
     # ── 자연/날씨 ──
-    "heart":        "a filled heart symbol with two rounded lobes and one bottom point",
+    "heart":        "a filled heart with two rounded lobes and one bottom point",
     "star":         "a five-pointed star with five sharp tips and radial symmetry",
     "cloud":        "a soft rounded cloud with a bumpy top and no sharp tips",
     "moon":         "a moon, thin crescent moon arc open on one side",
-    "rainbow":      "a rainbow, smooth wide rainbow arc with nested curved bands",
+    # "rainbow":      "a rainbow, smooth wide rainbow arc with nested curved bands",
     "lightning":    "a lightning bolt, single sharp lightning bolt with a zigzag body and no left-right symmetry",
     "fire":         "a flame shape with a pointed top and curved sides",
     "flower":       "a flower with a center and several rounded petals around it",
     # "leaf":         "a hand-drawn leaf shape with pointed tip, sketch",
-    "butterfly":    "a butterfly with two left-right wings and a narrow center body",
+    # "butterfly":    "a butterfly with two left-right wings and a narrow center body",
     "tree":         "a tree with a narrow trunk and a rounded leafy canopy",
     "fruit":        "a fruit, round shape with a small stem or leaf such as orange or apple",
     # ── 패션/소품 ──

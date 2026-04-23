@@ -107,6 +107,7 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
         prompt = _build_inpaint_prompt(shape_name, subject_prompt, color_weights)
     else:
         style_label = style_preset.replace('-', ' ')
+        print("ERROR: [프롬프트 유틸 없음] 스타일 레이블:", style_label, flush=True)
         prompt = (
             f"Add {subject_prompt} naturally in the masked area.\n"
             f"Match the photo's lighting, angle, and scale.\n"
@@ -116,7 +117,7 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
         )
 
     label_prefix = f'[{debug_label}] ' if debug_label else ''
-    print(f'[AI] {label_prefix}형태 감지: {shape_name} / 스타일: {style_preset} / 프롬프트: {prompt[:60]}...', flush=True)
+    print(f'[AI] {label_prefix}형태 감지: {shape_name} / 스타일: {style_preset} / 프롬프트: {prompt}...', flush=True)
 
     result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset=style_preset)
 

@@ -138,9 +138,19 @@ def build_inpaint_prompt(shape: str, subject_prompt: str, color_weights: ColorWe
         color_clause = (
             f"{format_color_weights_for_prompt(color_weights)}"
         )
+    color_prefix = f"{color_clause} " if color_clause else ""
+    if shape == "unknown" or subject == "decorative accessory":
+        return (
+            f"Add a {color_prefix}photo sticker or wearable accessory that follows the sketch silhouette naturally in the masked area.\n"
+            f"Match the accessory to the mask shape, placement, and size.\n"
+            f"Match the photo's lighting, angle, and scale.\n"
+            f"Keep the person's face, hair, body, and clothes unchanged.\n"
+            f"Do not generate person, face, or body parts in the masked area.\n"
+            f"Focus on one clean accessory or sticker that fits the drawn shape naturally."
+        )
     # shape_guidance = _build_shape_guidance(shape, subject)
     return (
-        f"Add a {color_clause} {subject} naturally in the masked area.\n"
+        f"Add a {color_prefix}{subject} naturally in the masked area.\n"
         # f"Match the photo's lighting, angle, and scale.\n{shape_guidance}\n{color_clause}\n"
         f"Match the photo's lighting, angle, and scale.\n"
         f"Keep the person's face, hair, body, and clothes unchanged.\n"

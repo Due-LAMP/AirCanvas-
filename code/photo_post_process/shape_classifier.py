@@ -16,8 +16,10 @@ import numpy as np
 from pathlib import Path
 
 MODEL_PATH = Path(__file__).parent / "models" / "sketch_classifier.pt"
-CLIP_MODEL_ID = os.getenv("AIRCANVAS_CLIP_MODEL", "openai/clip-vit-large-patch14")
+CLIP_MODEL_ID = os.getenv("AIRCANVAS_CLIP_MODEL", "openai/clip-vit-base-patch32")
 CLIP_FALLBACK_MODEL_ID = "openai/clip-vit-base-patch32"
+LOW_CONFIDENCE_FILLED_RETRY_THRESHOLD = 0.25
+LOW_CONFIDENCE_GENERIC_PROMPT_THRESHOLD = 0.3
 
 # ──────────────────────────────────────────────────────────────
 # Shape → inpainting subject 매핑
@@ -60,29 +62,29 @@ _CLIP_CANDIDATES = {
     "heart":        "a filled heart symbol with two rounded lobes and one bottom point",
     "star":         "a five-pointed star with five sharp tips and radial symmetry",
     "cloud":        "a soft rounded cloud with a bumpy top and no sharp tips",
-    "moon":         "a thin crescent moon arc open on one side",
-    "rainbow":      "a smooth wide rainbow arc with nested curved bands",
-    "lightning":    "a single sharp lightning bolt with a zigzag body and no left-right symmetry",
+    "moon":         "a moon, thin crescent moon arc open on one side",
+    "rainbow":      "a rainbow, smooth wide rainbow arc with nested curved bands",
+    "lightning":    "a lightning bolt, single sharp lightning bolt with a zigzag body and no left-right symmetry",
     "fire":         "a flame shape with a pointed top and curved sides",
     "flower":       "a flower with a center and several rounded petals around it",
     # "leaf":         "a hand-drawn leaf shape with pointed tip, sketch",
     "butterfly":    "a butterfly with two left-right wings and a narrow center body",
     "tree":         "a tree with a narrow trunk and a rounded leafy canopy",
-    "fruit":        "a round fruit shape with a small stem or leaf",
+    "fruit":        "a fruit, round shape with a small stem or leaf such as orange or apple",
     # ── 패션/소품 ──
-    "sunglasses":   "a wide horizontal glasses accessory with two left-right lenses joined by a thin center bridge",
+    "sunglasses":   "a sunglasses, wide horizontal glasses accessory with two left-right lenses joined by a thin center bridge",
     "crown":        "a crown with a flat bottom band and three or more spikes on top, symmetric",
-    "hat":          "a hat with a brim or a simple party hat silhouette",
+    "hat":          "a hat, cone party hat with one top point and a wide flat bottom, a single centered hat silhouette",
     "bow":          "a ribbon bow with two side loops and a small center knot",
     # "diamond":      "a hand-drawn diamond or rhombus gem shape, a single closed polygon, sketch",
-    "cat_ears":     "a cat ear headband with two short pointed triangular ears, left and right, symmetric",
-    "rabbit_ears":  "a bunny ear headband with two long narrow upright ears, left and right, symmetric",
+    "cat_ears":     "two separate pointed triangular cat ear shapes at the top, left and right, like a cat ear headband, not a rounded speech bubble",
+    "rabbit_ears":  "two separate long narrow upright bunny ear shapes at the top, left and right, like a headband",
     "mustache":     "a mustache with two mirrored curved halves and a split center, wide and horizontal",
     "whiskers":     "thin whisker lines extending left and right from the center, not a closed shape",
     # ── 기타 ──
     # "arrow":        "a hand-drawn arrow shape with one shaft and one pointed arrowhead showing direction, sketch",
     "music_note":   "a musical note with one round note head and one thin vertical stem",
-    "speech_bubble":"a speech bubble with a rounded outline and a small tail",
+    "speech_bubble":"one single rounded closed speech bubble with a small tail, not two separate pointed ear shapes",
     # "bomb":         "a hand-drawn round bomb shape with a fuse on top, sketch",
 }
 
@@ -146,13 +148,73 @@ def classify(mask_path, debug_label: str | None = None) -> tuple[str, str, float
         if MODEL_PATH.exists():
             print("  YOLO 모델로 분류 시도...")
             shape = _classify_with_yolo(mask_path)
+            confidence = None
         else:
-            print("  OpenCV 컨투어 분석으로 분류 시도...")
-            shape = _classify_with_opencv(mask_path)
-        confidence = None
+            prefix = f"[{debug_label}] " if debug_label else ""
+            print(f"  {prefix}분류 모델 없음 → generic accessory로 처리")
+            shape = "unknown"
+            confidence = 0.0
 
     prompt = SHAPE_TO_PROMPT.get(shape, SHAPE_TO_PROMPT["unknown"])
-    return shape, prompt, confidence
+    return _apply_low_confidence_generic_fallback(shape, prompt, confidence, debug_label=debug_label)
+
+
+def _build_contour_feature(contour) -> dict[str, float]:
+    x, y, w, h = cv2.boundingRect(contour)
+    area = cv2.contourArea(contour)
+    rect_area = max(1, w * h)
+    fill_ratio = area / rect_area
+    epsilon = 0.04 * cv2.arcLength(contour, True)
+    vertices = len(cv2.approxPolyDP(contour, epsilon, True))
+    return {
+        "x": float(x),
+        "y": float(y),
+        "w": float(w),
+        "h": float(h),
+        "area": float(area),
+        "aspect": float(w / h) if h > 0 else 999.0,
+        "fill_ratio": float(fill_ratio),
+        "vertices": float(vertices),
+    }
+
+
+def _classify_paired_ear_features(features: list[dict[str, float]], height: int, width: int) -> str | None:
+    if len(features) != 2:
+        return None
+
+    left, right = sorted(features, key=lambda feature: feature["x"])
+    gap = right["x"] - (left["x"] + left["w"])
+    avg_height = (left["h"] + right["h"]) / 2
+    avg_width = (left["w"] + right["w"]) / 2
+    avg_aspect = (left["aspect"] + right["aspect"]) / 2
+    avg_fill = (left["fill_ratio"] + right["fill_ratio"]) / 2
+    avg_vertices = (left["vertices"] + right["vertices"]) / 2
+    pair_span = (right["x"] + right["w"]) - left["x"]
+
+    if gap < -min(left["w"], right["w"]) * 0.25:
+        return None
+    if gap > max(avg_width * 2.5, width * 0.3):
+        return None
+    if pair_span < width * 0.16:
+        return None
+    if left["y"] > height * 0.6 or right["y"] > height * 0.6:
+        return None
+    if left["h"] < height * 0.12 or right["h"] < height * 0.12:
+        return None
+    if abs(left["h"] - right["h"]) / max(left["h"], right["h"]) > 0.5:
+        return None
+    if abs(left["area"] - right["area"]) / max(left["area"], right["area"]) > 0.8:
+        return None
+    if avg_aspect > 1.35:
+        return None
+
+    if avg_aspect < 0.72 and avg_height / max(avg_width, 1.0) > 1.45:
+        return "rabbit_ears"
+
+    if avg_fill < 0.8 or avg_vertices <= 8:
+        return "cat_ears"
+
+    return "cat_ears"
 
 
 def _classify_ear_accessory(mask_path: Path) -> str | None:
@@ -168,59 +230,8 @@ def _classify_ear_accessory(mask_path: Path) -> str | None:
     height, width = binary.shape
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = [contour for contour in contours if cv2.contourArea(contour) >= 150]
-    if len(contours) != 2:
-        return None
-
-    contours = sorted(contours, key=lambda contour: cv2.boundingRect(contour)[0])
-    features = []
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = cv2.contourArea(contour)
-        rect_area = max(1, w * h)
-        fill_ratio = area / rect_area
-        epsilon = 0.04 * cv2.arcLength(contour, True)
-        vertices = len(cv2.approxPolyDP(contour, epsilon, True))
-        features.append({
-            "x": x,
-            "y": y,
-            "w": w,
-            "h": h,
-            "area": area,
-            "aspect": w / h if h > 0 else 999,
-            "fill_ratio": fill_ratio,
-            "vertices": vertices,
-        })
-
-    left, right = features
-    gap = right["x"] - (left["x"] + left["w"])
-    avg_height = (left["h"] + right["h"]) / 2
-    avg_width = (left["w"] + right["w"]) / 2
-    avg_aspect = (left["aspect"] + right["aspect"]) / 2
-    avg_fill = (left["fill_ratio"] + right["fill_ratio"]) / 2
-    avg_vertices = (left["vertices"] + right["vertices"]) / 2
-
-    if gap < -10 or gap > avg_height * 0.9:
-        return None
-    if left["y"] > height * 0.35 or right["y"] > height * 0.35:
-        return None
-    if left["h"] < height * 0.18 or right["h"] < height * 0.18:
-        return None
-    if abs(left["h"] - right["h"]) / max(left["h"], right["h"]) > 0.35:
-        return None
-    if abs(left["area"] - right["area"]) / max(left["area"], right["area"]) > 0.45:
-        return None
-    if left["aspect"] > 1.0 or right["aspect"] > 1.0:
-        return None
-
-    # 토끼 귀: 더 길고 가늘며, 곡선이 많아 꼭짓점 수가 비교적 많다.
-    if avg_aspect < 0.68 and avg_height / max(avg_width, 1) > 1.6 and avg_vertices >= 5:
-        return "rabbit_ears"
-
-    # 고양이 귀: 상대적으로 짧고 삼각형에 가까워 채움 비율이 낮고 꼭짓점 수가 적다.
-    if avg_aspect < 0.95 and avg_fill < 0.62:
-        return "cat_ears"
-
-    return None
+    features = [_build_contour_feature(contour) for contour in contours]
+    return _classify_paired_ear_features(features, height, width)
 
 
 def _prepare_clip_mask_rgb(mask_gray: np.ndarray) -> np.ndarray:
@@ -314,9 +325,8 @@ def _classify_with_clip(mask_path: Path, debug_label: str | None = None) -> tupl
         print(f"  {prefix}crop 결과 채택({crop_label}, {crop_prob:.2f})")
         return crop_label, crop_prob
 
-    # 신뢰도 낮으면 OpenCV fallback
-    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
-    return _classify_with_opencv(mask_path), best_prob
+    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → generic accessory fallback")
+    return "unknown", best_prob
 
 
 
@@ -435,38 +445,8 @@ def _classify_ear_accessory_from_array(img: np.ndarray) -> str | None:
     height, width = binary.shape
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = [c for c in contours if cv2.contourArea(c) >= 150]
-    if len(contours) != 2:
-        return None
-    contours = sorted(contours, key=lambda c: cv2.boundingRect(c)[0])
-    features = []
-    for contour in contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        area = cv2.contourArea(contour)
-        rect_area = max(1, w * h)
-        fill_ratio = area / rect_area
-        epsilon = 0.04 * cv2.arcLength(contour, True)
-        vertices = len(cv2.approxPolyDP(contour, epsilon, True))
-        features.append({"x": x, "y": y, "w": w, "h": h, "area": area,
-                          "aspect": w / h if h > 0 else 999,
-                          "fill_ratio": fill_ratio, "vertices": vertices})
-    left, right = features
-    gap = right["x"] - (left["x"] + left["w"])
-    avg_height = (left["h"] + right["h"]) / 2
-    avg_width  = (left["w"] + right["w"]) / 2
-    avg_aspect = (left["aspect"] + right["aspect"]) / 2
-    avg_fill   = (left["fill_ratio"] + right["fill_ratio"]) / 2
-    avg_vertices = (left["vertices"] + right["vertices"]) / 2
-    if gap < -10 or gap > avg_height * 0.9: return None
-    if left["y"] > height * 0.35 or right["y"] > height * 0.35: return None
-    if left["h"] < height * 0.18 or right["h"] < height * 0.18: return None
-    if abs(left["h"] - right["h"]) / max(left["h"], right["h"]) > 0.35: return None
-    if abs(left["area"] - right["area"]) / max(left["area"], right["area"]) > 0.45: return None
-    if left["aspect"] > 1.0 or right["aspect"] > 1.0: return None
-    if avg_aspect < 0.68 and avg_height / max(avg_width, 1) > 1.6 and avg_vertices >= 5:
-        return "rabbit_ears"
-    if avg_aspect < 0.95 and avg_fill < 0.62:
-        return "cat_ears"
-    return None
+    features = [_build_contour_feature(contour) for contour in contours]
+    return _classify_paired_ear_features(features, height, width)
 
 
 def _classify_with_opencv_from_array(img: np.ndarray) -> str:
@@ -528,17 +508,12 @@ def _classify_with_clip_from_array(img: np.ndarray, debug_label: str | None = No
         print(f"  {prefix}crop 결과 채택({crop_label}, {crop_prob:.2f})")
         return crop_label, crop_prob
 
-    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
-    return _classify_with_opencv_from_array(img), best_prob
+    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → generic accessory fallback")
+    return "unknown", best_prob
 
 
-def classify_from_array(mask_gray: np.ndarray, debug_label: str | None = None) -> tuple[str, str, float | None]:
-    """
-    numpy array(그레이스케일)에서 직접 shape을 분류한다. 디스크 I/O 없음.
-
-    Returns:
-        (shape_name, inpaint_prompt, clip_top1_confidence)
-    """
+def _classify_from_array_once(mask_gray: np.ndarray, debug_label: str | None = None) -> tuple[str, str, float | None]:
+    """단일 마스크 배열에 대해 한 번만 shape 분류를 수행한다."""
     ear_shape = _classify_ear_accessory_from_array(mask_gray)
     if ear_shape is not None:
         prefix = f"[{debug_label}] " if debug_label else ""
@@ -567,10 +542,68 @@ def classify_from_array(mask_gray: np.ndarray, debug_label: str | None = None) -
                     _os.unlink(tmp_path)
                 except Exception:
                     pass
+            confidence = None
         else:
-            print("  OpenCV 컨투어 분석으로 분류 시도...")
-            shape = _classify_with_opencv_from_array(mask_gray)
-        confidence = None
+            prefix = f"[{debug_label}] " if debug_label else ""
+            print(f"  {prefix}분류 모델 없음 → generic accessory로 처리")
+            shape = "unknown"
+            confidence = 0.0
 
     prompt = SHAPE_TO_PROMPT.get(shape, SHAPE_TO_PROMPT["unknown"])
     return shape, prompt, confidence
+
+
+def _apply_low_confidence_generic_fallback(
+    shape: str,
+    prompt: str,
+    confidence: float | None,
+    debug_label: str | None = None,
+    threshold: float = LOW_CONFIDENCE_GENERIC_PROMPT_THRESHOLD,
+) -> tuple[str, str, float | None]:
+    if confidence is None or confidence >= threshold:
+        return shape, prompt, confidence
+
+    prefix = f"[{debug_label}] " if debug_label else ""
+    print(f"  {prefix}최종 신뢰도 낮음({confidence:.2f}) → unknown/generic accessory 사용")
+    return "unknown", SHAPE_TO_PROMPT["unknown"], confidence
+
+
+def classify_from_array(
+    mask_gray: np.ndarray,
+    debug_label: str | None = None,
+    filled_mask_gray: np.ndarray | None = None,
+    low_confidence_threshold: float = LOW_CONFIDENCE_FILLED_RETRY_THRESHOLD,
+) -> tuple[str, str, float | None]:
+    """
+    numpy array(그레이스케일)에서 직접 shape을 분류한다. 디스크 I/O 없음.
+
+    라인 마스크를 우선 사용하고, 신뢰도가 낮을 때만 filled mask로 재분류한다.
+
+    Returns:
+        (shape_name, inpaint_prompt, clip_top1_confidence)
+    """
+    shape, prompt, confidence = _classify_from_array_once(mask_gray, debug_label=debug_label)
+
+    if filled_mask_gray is None or confidence is None or confidence >= low_confidence_threshold:
+        return shape, prompt, confidence
+
+    prefix = f"[{debug_label}] " if debug_label else ""
+    print(f"  {prefix}라인 분류 신뢰도 낮음({confidence:.2f}) → filled mask 재분류")
+
+    filled_label = f"{debug_label}:filled" if debug_label else "filled"
+    filled_shape, filled_prompt, filled_confidence = _classify_from_array_once(
+        filled_mask_gray,
+        debug_label=filled_label,
+    )
+
+    if filled_confidence is not None and filled_confidence >= low_confidence_threshold and filled_confidence > confidence:
+        print(f"  {prefix}filled 결과 채택({filled_shape}, {filled_confidence:.2f})")
+        return _apply_low_confidence_generic_fallback(
+            filled_shape,
+            filled_prompt,
+            filled_confidence,
+            debug_label=debug_label,
+        )
+
+    print(f"  {prefix}라인 결과 유지({shape}, {confidence:.2f})")
+    return _apply_low_confidence_generic_fallback(shape, prompt, confidence, debug_label=debug_label)

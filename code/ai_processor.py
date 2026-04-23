@@ -93,7 +93,11 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
     subject_prompt = 'a decorative accessory'
 
     if SHAPE_CLASSIFIER_AVAILABLE:
-        shape_name, subject_prompt, _conf = _classify_shape_from_array(mask_gray, debug_label=debug_label)
+        shape_name, subject_prompt, _conf = _classify_shape_from_array(
+            mask_gray,
+            debug_label=debug_label,
+            filled_mask_gray=mask_filled,
+        )
 
     if _PROMPT_UTILS_AVAILABLE:
         color_weights = []

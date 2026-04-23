@@ -26,8 +26,12 @@ for _f in (config.VID_TMP, config.VID_PLAY):
 # ── CLIP 백그라운드 프리로드 ──────────────────────────────────────
 def _preload_clip():
     try:
-        from shape_classifier import _load_clip
-        _load_clip()
+        if getattr(ai_processor, 'SHAPE_CLASSIFIER_AVAILABLE', False):
+            import importlib
+            shape_classifier = importlib.import_module('shape_classifier')
+            shape_classifier._load_clip()
+        else:
+            print("[CLIP 프리로드] shape_classifier 비활성화 상태", flush=True)
     except Exception as _e:
         print(f"[CLIP 프리로드] 실패 (무시): {_e}", flush=True)
 

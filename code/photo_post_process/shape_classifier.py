@@ -9,12 +9,15 @@ sketch shape classifier
   3. OpenCV 컨투어 분석 (항상 fallback)
 """
 
+import os
 import cv2
 import math
 import numpy as np
 from pathlib import Path
 
 MODEL_PATH = Path(__file__).parent / "models" / "sketch_classifier.pt"
+CLIP_MODEL_ID = os.getenv("AIRCANVAS_CLIP_MODEL", "openai/clip-vit-large-patch14")
+CLIP_FALLBACK_MODEL_ID = "openai/clip-vit-base-patch32"
 
 # ──────────────────────────────────────────────────────────────
 # Shape → inpainting subject 매핑
@@ -54,32 +57,33 @@ SHAPE_TO_PROMPT: dict[str, str] = {
 # CLIP 후보 텍스트 — 각 shape의 손그림 특징을 설명
 _CLIP_CANDIDATES = {
     # ── 자연/날씨 ──
-    "heart":        "a hand-drawn filled heart shape, love symbol, sketch",
-    "star":         "a hand-drawn five-pointed star shape, sketch",
-    "cloud":        "a hand-drawn fluffy cloud shape with bumpy top, sketch",
-    "moon":         "a hand-drawn crescent moon shape, sketch",
-    "rainbow":      "a hand-drawn rainbow arc shape with curves, sketch",
-    "lightning":    "a hand-drawn lightning bolt zigzag shape, sketch",
-    "fire":         "a hand-drawn flame fire shape with pointed top, sketch",
-    "flower":       "a hand-drawn flower with petals around center, sketch",
-    "leaf":         "a hand-drawn leaf shape with pointed tip, sketch",
-    "butterfly":    "a hand-drawn butterfly shape with two wings, sketch",
-    "tree":         "a hand-drawn tree shape with a trunk and a leafy canopy, sketch",
+    "heart":        "a filled heart symbol with two rounded lobes and one bottom point",
+    "star":         "a five-pointed star with five sharp tips and radial symmetry",
+    "cloud":        "a soft rounded cloud with a bumpy top and no sharp tips",
+    "moon":         "a thin crescent moon arc open on one side",
+    "rainbow":      "a smooth wide rainbow arc with nested curved bands",
+    "lightning":    "a single sharp lightning bolt with a zigzag body and no left-right symmetry",
+    "fire":         "a flame shape with a pointed top and curved sides",
+    "flower":       "a flower with a center and several rounded petals around it",
+    # "leaf":         "a hand-drawn leaf shape with pointed tip, sketch",
+    "butterfly":    "a butterfly with two left-right wings and a narrow center body",
+    "tree":         "a tree with a narrow trunk and a rounded leafy canopy",
+    "fruit":        "a round fruit shape with a small stem or leaf",
     # ── 패션/소품 ──
-    "sunglasses":   "a hand-drawn sunglasses shape with two round lenses, sketch",
-    "crown":        "a hand-drawn crown shape with pointed tips on top, sketch",
-    "hat":          "a hand-drawn party hat or top hat shape, sketch",
-    "bow":          "a hand-drawn ribbon bow shape with two rounded side loops and a center knot, sketch",
-    "diamond":      "a hand-drawn diamond or rhombus gem shape, a single closed polygon, sketch",
-    "cat_ears":     "a hand-drawn cat ears sketch, either a closed simple shape with two pointed triangular ears connected together, or a wearable cat ears accessory above a person's head with the bottom open like a headband silhouette, sketch",
-    "rabbit_ears":  "a hand-drawn bunny ears sketch, either a closed simple shape with two long upright ears connected together, or a wearable bunny ears accessory above a person's head with the bottom open like a headband silhouette, sketch",
-    "mustache":     "a hand-drawn mustache shape with two symmetrical curved parts spreading left and right from the center, sketch",
-    "whiskers":     "a hand-drawn cat whiskers shape, several thin horizontal lines spreading left and right from the center, sketch",
+    "sunglasses":   "a wide horizontal glasses accessory with two left-right lenses joined by a thin center bridge",
+    "crown":        "a crown with a flat bottom band and three or more spikes on top, symmetric",
+    "hat":          "a hat with a brim or a simple party hat silhouette",
+    "bow":          "a ribbon bow with two side loops and a small center knot",
+    # "diamond":      "a hand-drawn diamond or rhombus gem shape, a single closed polygon, sketch",
+    "cat_ears":     "a cat ear headband with two short pointed triangular ears, left and right, symmetric",
+    "rabbit_ears":  "a bunny ear headband with two long narrow upright ears, left and right, symmetric",
+    "mustache":     "a mustache with two mirrored curved halves and a split center, wide and horizontal",
+    "whiskers":     "thin whisker lines extending left and right from the center, not a closed shape",
     # ── 기타 ──
-    "arrow":        "a hand-drawn arrow shape with one shaft and one pointed arrowhead showing direction, sketch",
-    "music_note":   "a hand-drawn musical note shape with a round note head and a thin vertical stem, sketch",
-    "speech_bubble":"a hand-drawn speech bubble or chat balloon shape, sketch",
-    "bomb":         "a hand-drawn round bomb shape with a fuse on top, sketch",
+    # "arrow":        "a hand-drawn arrow shape with one shaft and one pointed arrowhead showing direction, sketch",
+    "music_note":   "a musical note with one round note head and one thin vertical stem",
+    "speech_bubble":"a speech bubble with a rounded outline and a small tail",
+    # "bomb":         "a hand-drawn round bomb shape with a fuse on top, sketch",
 }
 
 # CLIP 모델 캐싱 (최초 1회 로드)
@@ -91,23 +95,31 @@ def _load_clip():
     global _clip_model, _clip_processor
     if _clip_model is None:
         import logging
-        import os as _os
         import transformers as _tr
         _tr.logging.set_verbosity_error()
         logging.getLogger("transformers").setLevel(logging.ERROR)
         logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
-        _os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
-        _os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         from transformers import CLIPProcessor, CLIPModel
-        print("  CLIP 모델 로딩 중... (최초 1회)")
-        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        model_id = CLIP_MODEL_ID
+        print(f"  CLIP 모델 로딩 중... (최초 1회, {model_id})")
+        try:
+            _clip_model = CLIPModel.from_pretrained(model_id)
+            _clip_processor = CLIPProcessor.from_pretrained(model_id)
+        except Exception as clip_error:
+            if model_id == CLIP_FALLBACK_MODEL_ID:
+                raise
+            print(f"  CLIP 로딩 실패: {clip_error}")
+            print(f"  fallback 모델로 재시도: {CLIP_FALLBACK_MODEL_ID}")
+            _clip_model = CLIPModel.from_pretrained(CLIP_FALLBACK_MODEL_ID)
+            _clip_processor = CLIPProcessor.from_pretrained(CLIP_FALLBACK_MODEL_ID)
         _clip_model.eval()
         print("  CLIP 로딩 완료.")
     return _clip_model, _clip_processor
 
 
-def classify(mask_path) -> tuple[str, str, float | None]:
+def classify(mask_path, debug_label: str | None = None) -> tuple[str, str, float | None]:
     """
     마스크 이미지에서 shape을 분류한다.
 
@@ -118,15 +130,17 @@ def classify(mask_path) -> tuple[str, str, float | None]:
 
     ear_shape = _classify_ear_accessory(mask_path)
     if ear_shape is not None:
-        print(f"  귀 액세서리 규칙 기반 분류: {ear_shape}")
+        prefix = f"[{debug_label}] " if debug_label else ""
+        print(f"  {prefix}귀 액세서리 규칙 기반 분류: {ear_shape}")
         prompt = SHAPE_TO_PROMPT.get(ear_shape, SHAPE_TO_PROMPT["unknown"])
         return ear_shape, prompt, 1.0
 
     # 우선순위 1: CLIP zero-shot
     try:
         import transformers  # noqa: F401
-        print("  CLIP zero-shot으로 분류 시도...")
-        shape, confidence = _classify_with_clip(mask_path)
+        prefix = f"[{debug_label}] " if debug_label else ""
+        print(f"  {prefix}CLIP zero-shot으로 분류 시도...")
+        shape, confidence = _classify_with_clip(mask_path, debug_label=debug_label)
     except ImportError:
         # 우선순위 2: YOLO
         if MODEL_PATH.exists():
@@ -209,48 +223,102 @@ def _classify_ear_accessory(mask_path: Path) -> str | None:
     return None
 
 
-# ──────────────────────────────────────────────────────────────
-# CLIP zero-shot 분류 (transformers 설치 시 자동 활성화)
-# ──────────────────────────────────────────────────────────────
-def _classify_with_clip(mask_path: Path) -> tuple[str, float]:
+def _prepare_clip_mask_rgb(mask_gray: np.ndarray) -> np.ndarray:
+    """CLIP 입력용으로 마스크를 타이트 crop + margin + square pad 한다."""
+    if mask_gray.ndim == 3:
+        mask_gray = cv2.cvtColor(mask_gray, cv2.COLOR_BGR2GRAY)
+
+    _, binary = cv2.threshold(mask_gray, 127, 255, cv2.THRESH_BINARY)
+    nonzero = cv2.findNonZero(binary)
+    if nonzero is None:
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2RGB)
+
+    x, y, w, h = cv2.boundingRect(nonzero)
+    margin = max(12, int(max(w, h) * 0.18))
+    x1 = max(0, x - margin)
+    y1 = max(0, y - margin)
+    x2 = min(binary.shape[1], x + w + margin)
+    y2 = min(binary.shape[0], y + h + margin)
+
+    cropped = binary[y1:y2, x1:x2]
+    crop_h, crop_w = cropped.shape[:2]
+    side = max(crop_h, crop_w)
+    square = np.zeros((side, side), dtype=np.uint8)
+    offset_y = (side - crop_h) // 2
+    offset_x = (side - crop_w) // 2
+    square[offset_y:offset_y + crop_h, offset_x:offset_x + crop_w] = cropped
+
+    if side < 224:
+        square = cv2.resize(square, (224, 224), interpolation=cv2.INTER_NEAREST)
+
+    return cv2.cvtColor(square, cv2.COLOR_GRAY2RGB)
+
+
+def _run_clip_probs(image_rgb: np.ndarray, labels: list[str], texts: list[str], model, processor):
     import torch
     from PIL import Image
 
-    model, processor = _load_clip()
-
-    # 마스크를 RGB로 변환 (흰색 shape, 검정 배경 → 반전하여 검정 sketch 느낌)
-    with Image.open(mask_path) as img:
-        img_rgb = img.convert("RGB")
-
-    labels = list(_CLIP_CANDIDATES.keys())
-    texts  = list(_CLIP_CANDIDATES.values())
-
     inputs = processor(
         text=texts,
-        images=img_rgb,
+        images=Image.fromarray(image_rgb),
         return_tensors="pt",
         padding=True,
     )
 
     with torch.no_grad():
         outputs = model(**inputs)
-        logits  = outputs.logits_per_image  # (1, num_classes)
-        probs   = logits.softmax(dim=1)[0]
+        return outputs.logits_per_image.softmax(dim=1)[0]
 
-    best_idx   = probs.argmax().item()
-    best_label = labels[best_idx]
-    best_prob  = probs[best_idx].item()
 
-    # 신뢰도 출력
+def _print_clip_top3(labels: list[str], probs, debug_label: str | None = None, tag: str = "CLIP Top-3"):
+    prefix = f"[{debug_label}] " if debug_label else ""
     top3 = sorted(zip(labels, probs.tolist()), key=lambda x: -x[1])[:3]
-    print(f"  CLIP Top-3: " + ", ".join(f"{l}({p:.2f})" for l, p in top3))
+    print(f"  {prefix}{tag}: " + ", ".join(f"{label}({score:.2f})" for label, score in top3))
+    return top3
+
+
+# ──────────────────────────────────────────────────────────────
+# CLIP zero-shot 분류 (transformers 설치 시 자동 활성화)
+# ──────────────────────────────────────────────────────────────
+def _classify_with_clip(mask_path: Path, debug_label: str | None = None) -> tuple[str, float]:
+    model, processor = _load_clip()
+
+    mask_gray = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+    if mask_gray is None:
+        return "unknown", 0.0
+    raw_rgb = cv2.cvtColor(mask_gray, cv2.COLOR_GRAY2RGB)
+    crop_rgb = _prepare_clip_mask_rgb(mask_gray)
+
+    labels = list(_CLIP_CANDIDATES.keys())
+    texts  = list(_CLIP_CANDIDATES.values())
+
+    raw_probs = _run_clip_probs(raw_rgb, labels, texts, model, processor)
+
+    best_idx   = raw_probs.argmax().item()
+    best_label = labels[best_idx]
+    best_prob  = raw_probs[best_idx].item()
+
+    _print_clip_top3(labels, raw_probs, debug_label=debug_label, tag="CLIP Top-3")
+
+    if best_prob >= 0.25:
+        return best_label, best_prob
+
+    crop_probs = _run_clip_probs(crop_rgb, labels, texts, model, processor)
+    crop_idx = crop_probs.argmax().item()
+    crop_label = labels[crop_idx]
+    crop_prob = crop_probs[crop_idx].item()
+    _print_clip_top3(labels, crop_probs, debug_label=debug_label, tag="CLIP crop Top-3")
+
+    prefix = f"[{debug_label}] " if debug_label else ""
+    if crop_prob >= 0.25 and crop_prob - best_prob >= 0.15:
+        print(f"  {prefix}crop 결과 채택({crop_label}, {crop_prob:.2f})")
+        return crop_label, crop_prob
 
     # 신뢰도 낮으면 OpenCV fallback
-    if best_prob < 0.25:
-        print(f"  신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
-        return _classify_with_opencv(mask_path), best_prob
+    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
+    return _classify_with_opencv(mask_path), best_prob
 
-    return best_label, best_prob
+
 
 
 # ──────────────────────────────────────────────────────────────
@@ -434,30 +502,37 @@ def _classify_with_opencv_from_array(img: np.ndarray) -> str:
     return "unknown"
 
 
-def _classify_with_clip_from_array(img: np.ndarray) -> tuple[str, float]:
+def _classify_with_clip_from_array(img: np.ndarray, debug_label: str | None = None) -> tuple[str, float]:
     """_classify_with_clip 의 array 버전 — PIL.Image.fromarray 로 파일 I/O 생략."""
-    import torch
-    from PIL import Image
     model, processor = _load_clip()
-    img_rgb = Image.fromarray(img).convert("RGB")
+    raw_rgb = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB) if img.ndim == 2 else img
+    crop_rgb = _prepare_clip_mask_rgb(img)
     labels = list(_CLIP_CANDIDATES.keys())
     texts  = list(_CLIP_CANDIDATES.values())
-    inputs = processor(text=texts, images=img_rgb, return_tensors="pt", padding=True)
-    with torch.no_grad():
-        outputs = model(**inputs)
-        probs   = outputs.logits_per_image.softmax(dim=1)[0]
-    best_idx   = probs.argmax().item()
+    raw_probs = _run_clip_probs(raw_rgb, labels, texts, model, processor)
+    best_idx   = raw_probs.argmax().item()
     best_label = labels[best_idx]
-    best_prob  = probs[best_idx].item()
-    top3 = sorted(zip(labels, probs.tolist()), key=lambda x: -x[1])[:3]
-    print(f"  CLIP Top-3: " + ", ".join(f"{l}({p:.2f})" for l, p in top3))
-    if best_prob < 0.25:
-        print(f"  신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
-        return _classify_with_opencv_from_array(img), best_prob
-    return best_label, best_prob
+    best_prob  = raw_probs[best_idx].item()
+    _print_clip_top3(labels, raw_probs, debug_label=debug_label, tag="CLIP Top-3")
+    if best_prob >= 0.25:
+        return best_label, best_prob
+
+    crop_probs = _run_clip_probs(crop_rgb, labels, texts, model, processor)
+    crop_idx = crop_probs.argmax().item()
+    crop_label = labels[crop_idx]
+    crop_prob = crop_probs[crop_idx].item()
+    _print_clip_top3(labels, crop_probs, debug_label=debug_label, tag="CLIP crop Top-3")
+
+    prefix = f"[{debug_label}] " if debug_label else ""
+    if crop_prob >= 0.25 and crop_prob - best_prob >= 0.15:
+        print(f"  {prefix}crop 결과 채택({crop_label}, {crop_prob:.2f})")
+        return crop_label, crop_prob
+
+    print(f"  {prefix}신뢰도 낮음({best_prob:.2f}) → OpenCV fallback")
+    return _classify_with_opencv_from_array(img), best_prob
 
 
-def classify_from_array(mask_gray: np.ndarray) -> tuple[str, str, float | None]:
+def classify_from_array(mask_gray: np.ndarray, debug_label: str | None = None) -> tuple[str, str, float | None]:
     """
     numpy array(그레이스케일)에서 직접 shape을 분류한다. 디스크 I/O 없음.
 
@@ -466,14 +541,16 @@ def classify_from_array(mask_gray: np.ndarray) -> tuple[str, str, float | None]:
     """
     ear_shape = _classify_ear_accessory_from_array(mask_gray)
     if ear_shape is not None:
-        print(f"  귀 액세서리 규칙 기반 분류: {ear_shape}")
+        prefix = f"[{debug_label}] " if debug_label else ""
+        print(f"  {prefix}귀 액세서리 규칙 기반 분류: {ear_shape}")
         prompt = SHAPE_TO_PROMPT.get(ear_shape, SHAPE_TO_PROMPT["unknown"])
         return ear_shape, prompt, 1.0
 
     try:
         import transformers  # noqa: F401
-        print("  CLIP zero-shot으로 분류 시도...")
-        shape, confidence = _classify_with_clip_from_array(mask_gray)
+        prefix = f"[{debug_label}] " if debug_label else ""
+        print(f"  {prefix}CLIP zero-shot으로 분류 시도...")
+        shape, confidence = _classify_with_clip_from_array(mask_gray, debug_label=debug_label)
     except ImportError:
         if MODEL_PATH.exists():
             # YOLO 는 파일 경로가 필요 → 임시 파일 최소 사용

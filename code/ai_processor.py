@@ -69,7 +69,7 @@ def fill_mask_interior(mask_bin):
     return cv2.bitwise_or(interior, mask_bin)
 
 
-def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='pixel-art'):
+def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='pixel-art', debug_label=None):
     import io as _io
     from PIL import Image as _PILImage
 
@@ -93,7 +93,7 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
     subject_prompt = 'a decorative accessory'
 
     if SHAPE_CLASSIFIER_AVAILABLE:
-        shape_name, subject_prompt, _conf = _classify_shape_from_array(mask_gray)
+        shape_name, subject_prompt, _conf = _classify_shape_from_array(mask_gray, debug_label=debug_label)
 
     if _PROMPT_UTILS_AVAILABLE:
         color_weights = []
@@ -111,7 +111,8 @@ def pixelart_inpaint_one(img_bgr, mask_gray, reference_bgr=None, style_preset='p
             f"Focus on the {subject_prompt} and make it look like a natural part of the photo."
         )
 
-    print(f'[AI] 형태 감지: {shape_name} / 스타일: {style_preset} / 프롬프트: {prompt[:60]}...', flush=True)
+    label_prefix = f'[{debug_label}] ' if debug_label else ''
+    print(f'[AI] {label_prefix}형태 감지: {shape_name} / 스타일: {style_preset} / 프롬프트: {prompt[:60]}...', flush=True)
 
     result_bytes = _step1_inpaint(image_bytes, mask_bytes, prompt, style_preset=style_preset)
 
@@ -159,8 +160,10 @@ def _process_one_photo(args):
     has_drawing = (cv2.countNonZero(mask) > 0)
     if has_drawing:
         print(f'[AI] 사진 {i+1}/4 인페인팅 처리 중...', flush=True)
+        debug_label = f'shot_{i+1}_mask'
         base = pixelart_inpaint_one(base, mask, reference_bgr=drawn,
-                                    style_preset=style_preset)
+                                    style_preset=style_preset,
+                                    debug_label=debug_label)
     return i, base
 
 

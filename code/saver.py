@@ -99,6 +99,61 @@ def save_final(photos, session_dir, masks=None):
 
         cv2.imwrite(os.path.join(session_dir, "4cut.jpg"), collage)
 
+    html = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AirCanvas 4컷</title>
+  <style>
+    body { margin: 0; background: #111; display: flex; flex-direction: column; align-items: center; padding: 16px; }
+    h2 { color: #fff; font-family: sans-serif; margin: 12px 0; }
+    .photos { display: flex; gap: 16px; flex-wrap: nowrap; justify-content: center; }
+    .photo-box { text-align: center; }
+    .photo-box p { color: #aaa; font-family: sans-serif; margin: 6px 0; }
+    img { max-width: 45vw; border-radius: 8px; }
+    #ai-status { color: #888; font-family: sans-serif; font-size: 0.9em; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h2>AirCanvas 4컷</h2>
+  <div class="photos">
+    <div class="photo-box">
+      <img src="4cut.jpg">
+      <p>Original</p>
+    </div>
+    <div class="photo-box" id="ai-box">
+      <img id="ai-img" src="ai_4cut.jpg" onerror="retryAI(this)">
+      <p>AI Generated</p>
+    </div>
+  </div>
+  <p id="ai-status"></p>
+  <script>
+    var retrying = false;
+    function retryAI(img) {
+      if (retrying) return;
+      retrying = true;
+      document.getElementById('ai-status').textContent = 'AI 이미지 생성 중...';
+      img.style.opacity = '0';
+      function attempt() {
+        var t = new Image();
+        t.onload = function() {
+          img.src = t.src;
+          img.style.opacity = '1';
+          document.getElementById('ai-status').textContent = '';
+          retrying = false;
+        };
+        t.onerror = function() { setTimeout(attempt, 3000); };
+        t.src = 'ai_4cut.jpg?' + Date.now();
+      }
+      setTimeout(attempt, 3000);
+    }
+  </script>
+</body>
+</html>"""
+    with open(os.path.join(session_dir, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+
     print(f"✓ 저장 완료 → {session_dir}")
 
 

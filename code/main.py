@@ -487,7 +487,7 @@ def run(screen_record: bool = False):
                             _rc = cv2.imread(os.path.join(_session_dir, "4cut.jpg"))
                             _bucket_ref['result_collage'] = _rc
                             _sn  = os.path.basename(_session_dir)
-                            _url = f"http://{saver.LOCAL_IP}:{config.HTTP_PORT}/{_sn}/4cut.jpg"
+                            _url = f"http://{saver.LOCAL_IP}:{config.HTTP_PORT}/{_sn}/index.html"
                             _bucket_ref['qr_url'] = _url
                             if ai_processor.INPAINTING_AVAILABLE:
                                 ai_processor.build_ai_4cut(

@@ -1,5 +1,8 @@
 mediapipe
-carvekit
 pillow
 opencv-python
+numpy
+qrcode
 python-dotenv
+google-api-python-client
+google-auth-oauthlib

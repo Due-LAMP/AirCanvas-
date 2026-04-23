@@ -79,7 +79,7 @@ CAM_X        = 80
 CAM_W, CAM_H = 560, 420
 CAM_Y        = (600 - CAM_H) // 2
 INFO_X       = CAM_X
-INFO_Y       = CAM_Y - 28
+INFO_Y       = CAM_Y - 45
 INFO_W       = CAM_W
 FRAME_X, FRAME_Y = 720, 10
 

@@ -131,9 +131,10 @@ def draw_info_panel(canvas, gesture, result, draw_mode):
         g    = _GESTURE_LABEL.get(gesture, raw)
         m    = 'SHOOT' if gesture == 'peace' else 'RESET' if gesture == 'thumbdown' else _MODE_LABEL.get(draw_mode, 'DEFAULT')
         text = f'{g} [{m}]'
-        tw   = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0][0]
-        cv2.putText(canvas, text, (x + w // 2 - tw // 2, cy + 5),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, config.BLACK, 1, cv2.LINE_AA)
+        tw   = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.85, 2)[0][0]
+        tx   = x + w // 2 - tw // 2
+        cv2.putText(canvas, text, (tx, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.85, config.BLACK, 3, cv2.LINE_AA)
+        cv2.putText(canvas, text, (tx, cy + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.85, config.WHITE, 1, cv2.LINE_AA)
 
 
 # ── 선택 그리드 ───────────────────────────────────────────────────

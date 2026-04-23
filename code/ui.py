@@ -31,7 +31,7 @@ def palette_hit(ix, iy, h):
 
 # ── 커서 아이콘 ───────────────────────────────────────────────────
 def draw_pencil_icon(frame, ix, iy, color_bgr):
-    length, tip_len, width = 36, 10, 8
+    length, tip_len, width = 54, 15, 12
     rad  = np.deg2rad(-45)
     dx   = int(np.cos(rad) * length)
     dy   = int(np.sin(rad) * length)
@@ -57,7 +57,7 @@ def draw_pencil_icon(frame, ix, iy, color_bgr):
 
 
 def draw_eraser_icon(frame, ix, iy):
-    w2, h2 = 18, 12
+    w2, h2 = 27, 18
     ox, oy = ix + 5, iy - h2 - 5
     cv2.rectangle(frame, (ox, oy), (ox + w2 * 2, oy + h2 * 2), (220, 220, 255), -1)
     cv2.rectangle(frame, (ox, oy), (ox + w2 * 2, oy + h2 * 2), config.WHITE, 2)

@@ -67,7 +67,7 @@ def gmail_send_message_with_attachment(attachment_filenames, recipient=None):
     # MIME 메시지 생성
     message = MIMEMultipart()
     message["To"] = recipient if recipient else "tlsdbfk0000@gmail.com"
-    message["From"] = "jhkmo51@gmail.com"
+    message["From"] = "aircanvas.lg@gmail.com"
     message["Subject"] = "AirCanvas 네컷 사진이 도착했습니다!"
 
     # 본문 추가
@@ -160,7 +160,7 @@ def gmail_send_message():
     message.set_content("This is automated mail from Photobooth")
 
     message["To"] = "tlsdbfk0000@gmail.com"
-    message["From"] = "jhkmo51@gmail.com"
+    message["From"] = "aircanvas.lg@gmail.com"
     message["Subject"] = "Test message from Photobooth"
 
     # encoded message

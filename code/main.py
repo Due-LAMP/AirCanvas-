@@ -321,7 +321,9 @@ def run(screen_record: bool = False):
 
                     else:
                         if state != config.STATE_COUNTDOWN:
-                            hit = ui.palette_hit(ix, iy, cam_h)
+                            disp_x = int(ix * config.CAM_W / cam_w)
+                            disp_y = int(iy * config.CAM_H / cam_h)
+                            hit = ui.palette_hit(disp_x, disp_y, config.CAM_H)
                             if hit >= 0:
                                 color_idx        = hit
                                 drawing_color    = config.PEN_COLORS[color_idx]
